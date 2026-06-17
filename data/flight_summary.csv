@@ -1,0 +1,13 @@
+adep,ades,name_adep,name_ades,n_flights,n_positions
+SBBR,SBCT,Presidente Juscelino Kubitschek International Airport,Curitiba-Afonso Pena International Airport,6,5900
+SBBR,SBSV,Presidente Juscelino Kubitschek International Airport,Deputado Luiz Eduardo Magalhães International Airport,10,11695
+SBCF,SBKP,Tancredo Neves International Airport,Viracopos International Airport,9,6809
+SBCF,SBSP,Tancredo Neves International Airport,Congonhas–Deputado Freitas Nobre Airport,30,35492
+SBCT,SBBR,Curitiba-Afonso Pena International Airport,Presidente Juscelino Kubitschek International Airport,5,4318
+SBGR,SBRJ,São Paulo/Guarulhos–Governor André Franco Montoro International Airport,Santos Dumont Airport,4,2949
+SBGR,SBSV,São Paulo/Guarulhos–Governor André Franco Montoro International Airport,Deputado Luiz Eduardo Magalhães International Airport,12,18952
+SBKP,SBCF,Viracopos International Airport,Tancredo Neves International Airport,9,7581
+SBRJ,SBGR,Santos Dumont Airport,São Paulo/Guarulhos–Governor André Franco Montoro International Airport,3,1845
+SBSP,SBCF,Congonhas–Deputado Freitas Nobre Airport,Tancredo Neves International Airport,16,10534
+SBSV,SBBR,Deputado Luiz Eduardo Magalhães International Airport,Presidente Juscelino Kubitschek International Airport,9,12785
+SBSV,SBGR,Deputado Luiz Eduardo Magalhães International Airport,São Paulo/Guarulhos–Governor André Franco Montoro International Airport,14,26420

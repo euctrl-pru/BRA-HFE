@@ -1,0 +1,26 @@
+# R files
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Quarto
+*_cache/
+*_files/
+/.quarto/
+
+# Output
+*.html
+*.pdf
+
+# Backup files
+*.backup
+
+# Claude Code
+.claude/
+
+# Data files (large files not tracked in git)
+# Note: Keep summary CSVs, exclude large data files
+data/*.parquet
+data/brazil_hfe_2025_12_10.csv

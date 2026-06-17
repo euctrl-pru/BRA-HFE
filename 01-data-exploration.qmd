@@ -1,0 +1,868 @@
+---
+title: "Brazil Radar Data - Initial Exploration"
+author: "PRU Analysis"
+date: today
+format:
+  html:
+    code-fold: true
+    toc: true
+---
+
+## Data Overview
+
+### Source Dataset
+
+- **File**: `radar_2025_12_10.csv`
+- **Size**: 1.3 GB, 8.8 million position reports
+- **Coverage**: Single day (2025-12-10)
+- **Format**: Semicolon-delimited CSV
+
+### Data Fields
+
+- **Identification**: `id`, `callsign`, `nr_ssr` (SSR code)
+- **Route**: `addep`, `addes` (departure/arrival aerodromes)
+- **Time**: `dh_inicio`, `dh_fim` (flight start/end), `dt_radar` (position timestamp)
+- **Position**: `vl_latitude`, `vl_longitude`, `nr_flightlevel`
+- **Dynamics**: `nr_speed` (ground speed)
+- **Aircraft**: `ds_acctypes` (aircraft type list)
+
+### Reference Data
+
+- **Airport database**: 2,878 Brazilian aerodromes from OurAirports
+- **ICAO prefixes**: SB, SD, SI, SJ, SN, SS, SW
+- **Fields**: ICAO code, name, coordinates, elevation
+
+## Setup
+
+```{r}
+#| label: setup
+#| message: false
+
+library(conflicted)
+library(tidyverse)
+library(arrow)
+library(trrrj)
+library(sf)
+library(units)
+
+conflict_prefer("filter", "dplyr")
+conflicts_prefer(dplyr::lag)
+
+# Path to radar_brazil utilities
+radar_utils_path <- "../radar_brazil"
+
+# Load local helper functions
+source("R/sf_helpers.R")
+```
+
+## Load Data
+
+```{r}
+#| label: load-airports
+
+brazil_airports <- file.path(radar_utils_path, "data-raw", "brazil_airports_arp.csv") |>
+  read_csv(show_col_types = FALSE)
+```
+
+```{r}
+#| label: define-schema
+
+col_specs <- cols(
+  id = col_double(),
+  callsign = col_character(),
+  addep = col_character(),
+  addes = col_character(),
+  dh_inicio = col_datetime(format = ""),
+  dh_fim = col_datetime(format = ""),
+  ds_acctypes = col_character(),
+  vl_latitude = col_double(),
+  vl_longitude = col_double(),
+  nr_flightlevel = col_double(),
+  nr_speed = col_double(),
+  nr_ssr = col_double(),
+  dt_radar = col_datetime(format = "")
+)
+```
+
+
+## Extract Aerodrome Pair Trajectories
+
+Target aerodrome pairs for initial HFE validation (bidirectional):
+
+```{r}
+#| label: define-pairs
+
+# Aerodrome pairs to extract
+target_pairs <- tribble(
+  ~adep, ~ades,
+  "SBCF", "SBKP",
+  "SBKP", "SBCF",
+  "SBCF", "SBSP",
+  "SBSP", "SBCF",
+  "SBBR", "SBCT",
+  "SBCT", "SBBR",
+  "SBBR", "SBSV",
+  "SBSV", "SBBR",
+  "SBGR", "SBSV",
+  "SBSV", "SBGR",
+  "SBGR", "SBRJ",
+  "SBRJ", "SBGR"
+)
+
+target_pairs
+```
+
+```{r}
+#| label: load-radar-sample
+
+# Load full radar dataset (8.8M records)
+df_raw <- read_delim(
+  file = file.path(radar_utils_path, "data-raw", "radar_2025_12_10.csv"),
+  delim = ";",
+  trim_ws = TRUE,
+  col_types = col_specs
+)
+```
+
+```{r}
+#| label: filter-trajectories
+
+# Filter for target aerodrome pairs
+df_filtered <- df_raw |>
+  semi_join(target_pairs, by = c("addep" = "adep", "addes" = "ades"))
+
+# Check coverage
+df_filtered |>
+  count(addep, addes) |>
+  arrange(addep, addes)
+```
+
+## Trajectory Segmentation
+
+Segment continuous radar position reports into discrete flight trajectories:
+
+- **Temporal gap**: Split when time between positions > 30 minutes
+- **Callsign change**: Split when callsign changes
+- **Consistency filter**: Keep only flights with single consistent ADEP/ADES pair
+
+```{r}
+#| label: segment-trajectories
+
+# Segment continuous radar tracks into discrete flights
+df_trajectories <- df_filtered |>
+  rename(
+    pos_id = id,
+    timestamp = dt_radar,
+    adep = addep,
+    ades = addes
+  ) |>
+  mutate(altitude = 100 * nr_flightlevel) |>
+  select(
+    pos_id, callsign, timestamp,
+    longitude = vl_longitude,
+    latitude = vl_latitude,
+    altitude, adep, ades,
+    everything()
+  ) |>
+  arrange(callsign, timestamp) |>
+  mutate(
+    delta = if_else(
+      (!is.na(lag(callsign)) & callsign != lag(callsign)) |
+        (!is.na(lag(timestamp)) & (timestamp - lag(timestamp)) > minutes(30)),
+      1, 0
+    ),
+    fid = cumsum(delta)
+  ) |>
+  relocate(fid, .before = pos_id) |>
+  select(-starts_with("dh_"), -starts_with("nr_"), -delta) |>
+  group_by(fid) |>
+  mutate(
+    adep_n = n_distinct(adep, na.rm = TRUE),
+    ades_n = n_distinct(ades, na.rm = TRUE)
+  ) |>
+  filter(adep_n == 1, ades_n == 1) |>
+  ungroup() |>
+  select(-ends_with("_n")) |>
+  group_by(fid) |>
+  fill(adep, .direction = "downup") |>
+  fill(ades, .direction = "downup") |>
+  ungroup() |>
+  left_join(
+    brazil_airports,
+    by = c("adep" = "icao"),
+    suffix = c("", "_adep")
+  ) |>
+  rename(name_adep = name, elevation_adep = elevation) |>
+  left_join(
+    brazil_airports,
+    by = c("ades" = "icao"),
+    suffix = c("", "_ades")
+  ) |>
+  rename(name_ades = name, elevation_ades = elevation)
+```
+
+## Summary Statistics
+
+```{r}
+#| label: summary-stats
+
+# Flights per aerodrome pair
+flight_summary <- df_trajectories |>
+  group_by(adep, ades, name_adep, name_ades) |>
+  summarise(
+    n_flights = n_distinct(fid),
+    n_positions = n(),
+    .groups = "drop"
+  ) |>
+  arrange(adep, ades)
+
+flight_summary
+```
+
+```{r}
+#| label: trajectory-stats
+
+# Overall extraction results
+list(
+  total_flights = n_distinct(df_trajectories$fid),
+  total_positions = nrow(df_trajectories),
+  aerodrome_pairs = nrow(flight_summary),
+  date_coverage = range(df_trajectories$timestamp)
+)
+```
+
+## Export Sample Dataset
+
+Save extracted trajectories for ongoing HFE analysis work:
+
+```{r}
+#| label: export-data
+
+# Create data directory
+dir.create("data", showWarnings = FALSE)
+
+# Save as parquet for efficient storage/loading
+df_trajectories |>
+  write_parquet("data/sample_trajectories_2025_12_10.parquet")
+
+# Also save flight summary
+flight_summary |>
+  write_csv("data/flight_summary.csv")
+```
+
+**Output**:
+
+- `data/sample_trajectories_2025_12_10.parquet`: All position reports for extracted flights
+- `data/flight_summary.csv`: Summary table (flights and positions per pair)
+
+## Flight Count Summary
+
+```{r}
+#| label: flight-count-summary
+
+# Summary of detected movements per aerodrome pair
+movement_summary <- df_trajectories |>
+  group_by(adep, ades, name_adep, name_ades) |>
+  summarise(
+    flights = n_distinct(fid),
+    positions = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(flights))
+
+movement_summary |>
+  select(
+    `Origin` = adep,
+    `Departure Airport` = name_adep,
+    `Destination` = ades,
+    `Arrival Airport` = name_ades,
+    `Flights` = flights,
+    `Positions` = positions
+  ) |>
+  knitr::kable(
+    caption = "Detected movements for target aerodrome pairs (2025-12-10)",
+    format.args = list(big.mark = ",")
+  )
+```
+
+## Brazil HFE Reference Data
+
+Load and subset the Brazilian HFE dataset for comparison:
+
+```{r}
+#| label: load-brazil-hfe
+
+# Load full year Brazil HFE data
+bra_hfe_full <- read_delim(
+  file = file.path(radar_utils_path, "data-raw", "BRA-KEA-2025.csv"),
+  delim = ";",
+  trim_ws = TRUE,
+  show_col_types = FALSE
+)
+
+# Filter for 2025-12-10 (our surveillance data date)
+bra_hfe_dec10 <- bra_hfe_full |>
+  mutate(date = as.Date(time)) |>
+  filter(date == as.Date("2025-12-10"))
+
+# Further filter for our target aerodrome pairs
+bra_hfe_sample <- bra_hfe_dec10 |>
+  semi_join(target_pairs, by = c("plan_dep" = "adep", "plan_arr" = "ades"))
+
+# Summary
+list(
+  total_flights_year = nrow(bra_hfe_full),
+  flights_dec10 = nrow(bra_hfe_dec10),
+  flights_sample_pairs = nrow(bra_hfe_sample)
+)
+```
+
+```{r}
+#| label: brazil-hfe-sample-summary
+
+# Show sample flights per aerodrome pair
+bra_hfe_counts <- bra_hfe_sample |>
+  count(plan_dep, plan_arr, name = "bra_hfe_flights")
+
+bra_hfe_counts |>
+  left_join(
+    movement_summary |> select(adep, ades, flights),
+    by = c("plan_dep" = "adep", "plan_arr" = "ades")
+  ) |>
+  rename(
+    ADEP = plan_dep,
+    ADES = plan_arr,
+    `Brazil HFE` = bra_hfe_flights,
+    `Our Extract` = flights
+  ) |>
+  knitr::kable(
+    caption = "Flight counts comparison: Brazil HFE vs Our Radar Extract (2025-12-10)"
+  )
+```
+
+```{r}
+#| label: export-brazil-hfe-sample
+#| eval: false
+
+# Export Brazil HFE subset for ongoing comparison (disabled - file locked)
+bra_hfe_sample |>
+  write_csv("data/brazil_hfe_2025_12_10.csv")
+```
+
+**Output**: `data/brazil_hfe_2025_12_10.csv` - Brazil HFE reference for 2025-12-10 sample pairs (export disabled)
+
+## Horizontal Flight Efficiency (HFE) Algorithm
+
+### Methodology Overview
+
+HFE measures the efficiency of the en-route portion of a flight by comparing the actual flown trajectory to the great circle distance between defined milestones.
+
+**Key concepts** (see [ANS Performance Framework methodology](https://ansperformance.eu/methodology/horizontal-flight-efficiency-pi/)):
+
+- **Milestones**: Fixed distance points from departure/to arrival (40 NM and 100 NM)
+- **En-route segment**: Portion of flight between departure and arrival milestones
+- **HFE indicator**: Ratio of great circle distance to actual flown distance (× 100%)
+
+**Standard milestone pairs**:
+
+- **40 NM**: Start at 40 NM from ADEP, end at 40 NM to ADES
+- **100 NM**: Start at 100 NM from ADEP, end at 100 NM to ADES
+
+### Milestone Extraction
+
+Milestones are defined by **great circle distance from aerodrome reference points**:
+
+- Distance FROM ADEP: GC distance from departure airport position
+- Distance TO ADES: GC distance to arrival airport position
+- DIST_FLOWN: Cumulative distance along actual trajectory (from first point)
+
+```{r}
+#| label: calculate-milestones
+
+# Function to calculate great circle distance (Haversine)
+great_circle_distance <- function(lat1, lon1, lat2, lon2) {
+  # Earth radius in meters
+  R <- 6371000
+
+  # Convert to radians
+  lat1_rad <- lat1 * pi / 180
+  lat2_rad <- lat2 * pi / 180
+  dLat <- (lat2 - lat1) * pi / 180
+  dLon <- (lon2 - lon1) * pi / 180
+
+  # Haversine formula
+  a <- sin(dLat/2)^2 + cos(lat1_rad) * cos(lat2_rad) * sin(dLon/2)^2
+  c <- 2 * atan2(sqrt(a), sqrt(1-a))
+
+  d <- R * c
+  return(d)
+}
+
+# Add GC distances from/to aerodromes and find milestones
+df_with_gc <- df_trajectories |>
+  group_by(fid) |>
+  arrange(timestamp) |>
+  cumulative_distance() |>
+  mutate(
+    # Rename cumulative_distance to cum_dist and convert to meters
+    cum_dist = cumulative_distance * 1000,
+    # GC distance from ADEP ARP
+    gc_from_adep = great_circle_distance(
+      latitude_adep, longitude_adep,
+      latitude, longitude
+    ),
+    # GC distance to ADES ARP
+    gc_to_ades = great_circle_distance(
+      latitude, longitude,
+      latitude_ades, longitude_ades
+    )
+  ) |>
+  ungroup()
+
+# Extract milestones for each flight and milestone type
+extract_all_milestones <- function(.df) {
+  milestone_list <- list()
+
+  # FIRST_HIT: First trajectory point (proxy for takeoff)
+  first_hit <- .df |>
+    slice_head(n = 1) |>
+    mutate(mst = "FIRST_HIT")
+  milestone_list[[length(milestone_list) + 1]] <- first_hit
+
+  # Standard milestone pairs
+  for (target_nm in c(40, 100)) {
+    target_m <- target_nm * 1852
+
+    # FROM ADEP: First point where distance FROM ADEP >= target
+    ms_from <- .df |>
+      filter(gc_from_adep >= target_m) |>
+      slice_head(n = 1) |>
+      mutate(mst = paste0(target_nm, "NM_ADEP"))
+
+    if (nrow(ms_from) > 0) {
+      milestone_list[[length(milestone_list) + 1]] <- ms_from
+    }
+
+    # TO ADES: Last point where distance TO ADES >= target
+    # (distance TO ADES decreases as flight progresses toward destination)
+    ms_to <- .df |>
+      filter(gc_to_ades >= target_m) |>
+      slice_tail(n = 1) |>
+      mutate(mst = paste0(target_nm, "NM_ADES"))
+
+    if (nrow(ms_to) > 0) {
+      milestone_list[[length(milestone_list) + 1]] <- ms_to
+    }
+  }
+
+  # LAST_HIT: Last trajectory point (proxy for landing)
+  last_hit <- .df |>
+    slice_tail(n = 1) |>
+    mutate(mst = "LAST_HIT")
+  milestone_list[[length(milestone_list) + 1]] <- last_hit
+
+  bind_rows(milestone_list)
+}
+
+# Extract all milestones
+df_milestones <- df_with_gc |>
+  group_by(fid) |>
+  group_modify(~ extract_all_milestones(.x)) |>
+  ungroup() |>
+  select(
+    FLTID = fid,
+    ADEP = adep,
+    ADES = ades,
+    TIME = timestamp,
+    LAT = latitude,
+    LON = longitude,
+    ALT = altitude,
+    DIST_FLOWN = cum_dist,
+    MST = mst,
+    GC_FROM_ADEP = gc_from_adep,
+    GC_TO_ADES = gc_to_ades
+  )
+
+# Preview milestone table
+df_milestones |>
+  arrange(FLTID, MST) |>
+  head(20) |>
+  knitr::kable(
+    digits = 2,
+    caption = "Milestone table (first 20 rows)"
+  )
+```
+
+### HFE Calculation
+
+Calculate HFE indicator for each flight based on milestone pairs.
+
+**HFE formula**: (Great circle distance between milestones / Actual flown distance between milestones) × 100%
+
+```{r}
+#| label: calculate-hfe
+
+# Calculate HFE for 40 NM milestone pair
+hfe_40nm <- df_milestones |>
+  filter(MST %in% c("FIRST_HIT", "40NM_ADEP", "40NM_ADES", "LAST_HIT")) |>
+  group_by(FLTID, ADEP, ADES) |>
+  filter(sum(MST %in% c("40NM_ADEP", "40NM_ADES")) == 2) |>  # Both 40NM milestones must exist
+  summarise(
+    # Takeoff/landing proxies
+    takeoff_time = TIME[MST == "FIRST_HIT"][1],
+    landing_time = TIME[MST == "LAST_HIT"][1],
+    # 40NM milestone points
+    start_time = TIME[MST == "40NM_ADEP"][1],
+    end_time = TIME[MST == "40NM_ADES"][1],
+    start_lat = LAT[MST == "40NM_ADEP"][1],
+    start_lon = LON[MST == "40NM_ADEP"][1],
+    end_lat = LAT[MST == "40NM_ADES"][1],
+    end_lon = LON[MST == "40NM_ADES"][1],
+    dist_start = DIST_FLOWN[MST == "40NM_ADEP"][1],
+    dist_end = DIST_FLOWN[MST == "40NM_ADES"][1],
+    gc_from_adep_start = GC_FROM_ADEP[MST == "40NM_ADEP"][1],
+    gc_to_ades_end = GC_TO_ADES[MST == "40NM_ADES"][1],
+    .groups = "drop"
+  ) |>
+  mutate(
+    # Flown distance along trajectory between milestones
+    flown_dist_m = dist_end - dist_start,
+    flown_dist_nm = flown_dist_m / 1852,
+    # Achieved distance: GC between milestone points
+    achieved_dist_m = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
+    achieved_dist_nm = achieved_dist_m / 1852,
+    # HFE: achieved / flown
+    hfe_40nm = (achieved_dist_m / flown_dist_m) * 100,
+    milestone_pair = "40NM"
+  )
+
+# Calculate HFE for 100 NM milestone pair
+hfe_100nm <- df_milestones |>
+  filter(MST %in% c("FIRST_HIT", "100NM_ADEP", "100NM_ADES", "LAST_HIT")) |>
+  group_by(FLTID, ADEP, ADES) |>
+  filter(sum(MST %in% c("100NM_ADEP", "100NM_ADES")) == 2) |>  # Both 100NM milestones must exist
+  summarise(
+    # Takeoff/landing proxies
+    takeoff_time = TIME[MST == "FIRST_HIT"][1],
+    landing_time = TIME[MST == "LAST_HIT"][1],
+    # 100NM milestone points
+    start_time = TIME[MST == "100NM_ADEP"][1],
+    end_time = TIME[MST == "100NM_ADES"][1],
+    start_lat = LAT[MST == "100NM_ADEP"][1],
+    start_lon = LON[MST == "100NM_ADEP"][1],
+    end_lat = LAT[MST == "100NM_ADES"][1],
+    end_lon = LON[MST == "100NM_ADES"][1],
+    dist_start = DIST_FLOWN[MST == "100NM_ADEP"][1],
+    dist_end = DIST_FLOWN[MST == "100NM_ADES"][1],
+    gc_from_adep_start = GC_FROM_ADEP[MST == "100NM_ADEP"][1],
+    gc_to_ades_end = GC_TO_ADES[MST == "100NM_ADES"][1],
+    .groups = "drop"
+  ) |>
+  mutate(
+    # Flown distance along trajectory between milestones
+    flown_dist_m = dist_end - dist_start,
+    flown_dist_nm = flown_dist_m / 1852,
+    # Achieved distance: GC between milestone points
+    achieved_dist_m = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
+    achieved_dist_nm = achieved_dist_m / 1852,
+    # HFE: achieved / flown
+    hfe_100nm = (achieved_dist_m / flown_dist_m) * 100,
+    milestone_pair = "100NM"
+  )
+
+# Summary statistics
+bind_rows(
+  hfe_40nm |> select(FLTID, ADEP, ADES, milestone_pair, hfe = hfe_40nm),
+  hfe_100nm |> select(FLTID, ADEP, ADES, milestone_pair, hfe = hfe_100nm)
+) |>
+  group_by(milestone_pair) |>
+  summarise(
+    n_flights = n(),
+    mean_hfe = mean(hfe, na.rm = TRUE),
+    median_hfe = median(hfe, na.rm = TRUE),
+    min_hfe = min(hfe, na.rm = TRUE),
+    max_hfe = max(hfe, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  knitr::kable(
+    digits = 2,
+    caption = "HFE Summary Statistics by Milestone Pair"
+  )
+```
+
+## Example Visualizations
+
+Visualize sample trajectories for two aerodrome pairs: SBCF-SBKP and SBBR-SBSV.
+
+```{r}
+#| label: select-example-pairs
+
+# Select two aerodrome pairs for visualization
+example_pairs <- tribble(
+  ~adep, ~ades,
+  "SBCF", "SBKP",
+  "SBBR", "SBSV"
+)
+
+# Get flight IDs for these pairs
+example_flights <- df_trajectories |>
+  inner_join(example_pairs, by = c("adep", "ades")) |>
+  group_by(adep, ades) |>
+  slice_head(n = 3) |>  # First 3 flights per pair
+  distinct(fid) |>
+  pull(fid)
+
+# Filter trajectories for examples
+df_examples <- df_trajectories |>
+  filter(fid %in% example_flights) |>
+  drop_na(longitude, latitude, altitude)
+```
+
+### Milestone Data Points
+
+The table below shows the extracted milestone positions for the example flights, demonstrating the data points used in HFE calculation:
+
+```{r}
+#| label: show-example-milestones
+
+# Filter milestones for example flights only
+df_milestones |>
+  filter(FLTID %in% example_flights) |>
+  arrange(ADEP, ADES, FLTID, TIME) |>
+  mutate(
+    # Convert distances to NM for readability
+    DIST_FLOWN_NM = DIST_FLOWN / 1852,
+    GC_FROM_ADEP_NM = GC_FROM_ADEP / 1852,
+    GC_TO_ADES_NM = GC_TO_ADES / 1852
+  ) |>
+  select(
+    FLTID, ADEP, ADES, MST, TIME,
+    LAT, LON, ALT,
+    `Flown (NM)` = DIST_FLOWN_NM,
+    `From ADEP (NM)` = GC_FROM_ADEP_NM,
+    `To ADES (NM)` = GC_TO_ADES_NM
+  ) |>
+  knitr::kable(
+    digits = 2,
+    caption = "Milestone positions for example flights (SBCF-SBKP and SBBR-SBSV)"
+  )
+```
+
+### Horizontal (Plan) Views
+
+```{r}
+#| label: plot-horizontal-sbcf-sbkp
+#| fig-width: 10
+#| fig-height: 8
+
+# SBCF - SBKP horizontal view
+df_sbcf_sbkp <- df_examples |>
+  filter(adep == "SBCF", ades == "SBKP")
+
+# Airport positions
+apt_sbcf_sbkp <- df_sbcf_sbkp |>
+  distinct(
+    adep, ades,
+    lon_adep = longitude_adep, lat_adep = latitude_adep,
+    lon_ades = longitude_ades, lat_ades = latitude_ades,
+    name_adep, name_ades
+  )
+
+ggplot(df_sbcf_sbkp) +
+  geom_path(aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
+            linewidth = 0.8, alpha = 0.7) +
+  geom_point(data = apt_sbcf_sbkp,
+             aes(x = lon_adep, y = lat_adep),
+             color = "green", size = 4, shape = 17) +
+  geom_point(data = apt_sbcf_sbkp,
+             aes(x = lon_ades, y = lat_ades),
+             color = "red", size = 4, shape = 17) +
+  geom_text(data = apt_sbcf_sbkp,
+            aes(x = lon_adep, y = lat_adep, label = adep),
+            vjust = -1, color = "green", fontface = "bold") +
+  geom_text(data = apt_sbcf_sbkp,
+            aes(x = lon_ades, y = lat_ades, label = ades),
+            vjust = -1, color = "red", fontface = "bold") +
+  coord_fixed() +
+  labs(
+    title = "Horizontal View: SBCF → SBKP",
+    subtitle = sprintf("%s → %s", apt_sbcf_sbkp$name_adep, apt_sbcf_sbkp$name_ades),
+    x = "Longitude", y = "Latitude",
+    color = "Flight ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: plot-horizontal-sbbr-sbsv
+#| fig-width: 10
+#| fig-height: 8
+
+# SBBR - SBSV horizontal view
+df_sbbr_sbsv <- df_examples |>
+  filter(adep == "SBBR", ades == "SBSV")
+
+# Airport positions
+apt_sbbr_sbsv <- df_sbbr_sbsv |>
+  distinct(
+    adep, ades,
+    lon_adep = longitude_adep, lat_adep = latitude_adep,
+    lon_ades = longitude_ades, lat_ades = latitude_ades,
+    name_adep, name_ades
+  )
+
+ggplot(df_sbbr_sbsv) +
+  geom_path(aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
+            linewidth = 0.8, alpha = 0.7) +
+  geom_point(data = apt_sbbr_sbsv,
+             aes(x = lon_adep, y = lat_adep),
+             color = "green", size = 4, shape = 17) +
+  geom_point(data = apt_sbbr_sbsv,
+             aes(x = lon_ades, y = lat_ades),
+             color = "red", size = 4, shape = 17) +
+  geom_text(data = apt_sbbr_sbsv,
+            aes(x = lon_adep, y = lat_adep, label = adep),
+            vjust = -1, color = "green", fontface = "bold") +
+  geom_text(data = apt_sbbr_sbsv,
+            aes(x = lon_ades, y = lat_ades, label = ades),
+            vjust = -1, color = "red", fontface = "bold") +
+  coord_fixed() +
+  labs(
+    title = "Horizontal View: SBBR → SBSV",
+    subtitle = sprintf("%s → %s", apt_sbbr_sbsv$name_adep, apt_sbbr_sbsv$name_ades),
+    x = "Longitude", y = "Latitude",
+    color = "Flight ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+### Vertical Profiles
+
+```{r}
+#| label: plot-vertical-sbcf-sbkp
+#| fig-width: 10
+#| fig-height: 6
+
+# Use trrrj plotting function
+df_sbcf_sbkp |>
+  cumulative_distance() |>
+  plot_flight_vertical_distance() +
+  labs(
+    title = "Vertical Profile: SBCF → SBKP",
+    subtitle = sprintf("%s → %s", apt_sbcf_sbkp$name_adep, apt_sbcf_sbkp$name_ades)
+  )
+```
+
+```{r}
+#| label: plot-vertical-sbbr-sbsv
+#| fig-width: 10
+#| fig-height: 6
+
+# Use trrrj plotting function
+df_sbbr_sbsv |>
+  cumulative_distance() |>
+  plot_flight_vertical_distance() +
+  labs(
+    title = "Vertical Profile: SBBR → SBSV",
+    subtitle = sprintf("%s → %s", apt_sbbr_sbsv$name_adep, apt_sbbr_sbsv$name_ades)
+  )
+```
+
+## Comparison with Brazil HFE Data
+
+Compare our calculated milestones and HFE values against Brazil's reference dataset.
+
+**Note on time matching**:
+
+- **Our Time**: FIRST_HIT timestamp (first surveillance point, proxy for takeoff)
+- **BRA Time**: Timestamp from Brazil HFE dataset `time` field
+- **Matching**: Flights matched by ADEP/ADES pair and time proximity (within 1 hour)
+
+```{r}
+#| label: match-brazil-flights
+
+# Try to match flights between our extract and Brazil HFE
+# Match criteria: same ADEP, ADES, and similar time (within 1 hour)
+
+flight_comparison <- hfe_40nm |>
+  mutate(
+    adep = ADEP,
+    ades = ADES,
+    our_time = takeoff_time,  # Use FIRST_HIT as takeoff proxy
+    our_hfe_40nm = hfe_40nm,
+    our_achieved_dist_nm = achieved_dist_nm,
+    our_flown_dist_nm = flown_dist_nm
+  ) |>
+  left_join(
+    bra_hfe_sample |>
+      mutate(
+        bra_time = lubridate::as_datetime(time),
+        bra_hfe_v1 = kpi05_v1,
+        bra_hfe_v2 = kpi05_v2,
+        bra_dist_flown_v1_nm = dist_flown_v1,
+        bra_dist_flown_v2_nm = dist_flown_v2
+      ) |>
+      select(
+        adep = plan_dep,
+        ades = plan_arr,
+        bra_time,
+        bra_callsign = id_icao,
+        bra_hfe_v1,
+        bra_hfe_v2,
+        bra_dist_flown_v1_nm = dist_flown_v1,
+        bra_dist_flown_v2_nm = dist_flown_v2
+      ),
+    by = c("adep", "ades"),
+    relationship = "many-to-many"
+  ) |>
+  # Match by time proximity (within 1 hour)
+  mutate(time_diff_min = abs(as.numeric(difftime(our_time, bra_time, units = "mins")))) |>
+  group_by(FLTID) |>
+  slice_min(time_diff_min, n = 1) |>
+  ungroup() |>
+  filter(time_diff_min <= 60)  # Keep only matches within 1 hour
+
+flight_comparison |>
+  select(
+    FLTID, ADEP, ADES,
+    `Our Takeoff` = our_time,
+    `BRA Time` = bra_time,
+    `Δ Time (min)` = time_diff_min,
+    `Our HFE (%)` = our_hfe_40nm,
+    `BRA HFE v1 (%)` = bra_hfe_v1,
+    `BRA HFE v2 (%)` = bra_hfe_v2,
+    `Our Achieved (NM)` = our_achieved_dist_nm,
+    `Our Flown (NM)` = our_flown_dist_nm,
+    `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm,
+    `BRA Dist v2 (NM)` = bra_dist_flown_v2_nm
+  ) |>
+  head(15) |>
+  knitr::kable(
+    digits = 2,
+    caption = "Flight matching: Our calculations vs Brazil HFE reference"
+  )
+```
+
+```{r}
+#| label: comparison-stats
+
+# Summary statistics of differences
+if (nrow(flight_comparison) > 0) {
+  flight_comparison |>
+    summarise(
+      n_matched = n(),
+      mean_hfe_diff_v1 = mean(abs(our_hfe_40nm - bra_hfe_v1), na.rm = TRUE),
+      mean_hfe_diff_v2 = mean(abs(our_hfe_40nm - bra_hfe_v2), na.rm = TRUE),
+      mean_dist_diff_v1 = mean(abs(our_flown_dist_nm - bra_dist_flown_v1_nm), na.rm = TRUE),
+      mean_dist_diff_v2 = mean(abs(our_flown_dist_nm - bra_dist_flown_v2_nm), na.rm = TRUE)
+    ) |>
+    knitr::kable(
+      digits = 2,
+      caption = "Mean absolute differences between our calculations and Brazil HFE"
+    )
+} else {
+  cat("No flights matched between datasets")
+}
+```
