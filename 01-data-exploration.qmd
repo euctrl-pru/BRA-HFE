@@ -527,7 +527,8 @@ hfe_40nm <- df_milestones |>
     # HFE: achieved / flown
     hfe_40nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "40NM"
-  )
+  ) |>
+  filter(flown_dist_nm > 0)  # Remove routes too short for this milestone pair
 
 # Calculate HFE for 100 NM milestone pair
 hfe_100nm <- df_milestones |>
@@ -559,7 +560,8 @@ hfe_100nm <- df_milestones |>
     # HFE: achieved / flown
     hfe_100nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "100NM"
-  )
+  ) |>
+  filter(flown_dist_nm > 0)  # Remove routes too short for this milestone pair
 
 # Summary statistics
 bind_rows(
