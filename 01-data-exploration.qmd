@@ -965,3 +965,120 @@ flight_comparison |>
     caption = "HFE comparison by aerodrome pair (valid flights only) — positive diff = our HFE higher than BRA"
   )
 ```
+
+## Investigation: SBSV ↔ SBGR
+
+SBSV→SBGR shows a systematic −7.19% difference (our HFE 91.64% vs BRA 98.83%). This section investigates the cause.
+
+```{r}
+#| label: investigate-sbsv-sbgr
+#| fig-width: 10
+#| fig-height: 8
+
+# Step 1: Flight-level detail for SBSV→SBGR
+flight_comparison |>
+  filter(valid == TRUE, ADEP == "SBSV", ADES == "SBGR") |>
+  mutate(
+    bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100
+  ) |>
+  select(
+    FLTID,
+    `Our HFE v1 (%)` = our_hfe_40nm,
+    `BRA HFE v1 (%)` = bra_hfe_v1_pct,
+    `Diff (%)` = our_flown_dist_nm,
+    `Our Flown (NM)` = our_flown_dist_nm,
+    `BRA Flown (NM)` = bra_dist_flown_v1_nm,
+    `Our Achieved (NM)` = our_achieved_dist_nm,
+    `Takeoff` = our_time
+  ) |>
+  mutate(`Diff (%)` = `Our HFE v1 (%)` - `BRA HFE v1 (%)`) |>
+  arrange(`Diff (%)`) |>
+  knitr::kable(digits = 2, caption = "SBSV→SBGR: flight-by-flight comparison")
+```
+
+```{r}
+#| label: investigate-sbsv-sbgr-milestones
+
+# Step 2: Check milestone positions for SBSV→SBGR flights
+sbsv_sbgr_fltids <- flight_comparison |>
+  filter(valid == TRUE, ADEP == "SBSV", ADES == "SBGR") |>
+  pull(FLTID)
+
+df_milestones |>
+  filter(FLTID %in% sbsv_sbgr_fltids) |>
+  filter(MST %in% c("FIRST_HIT", "40NM_ADEP", "40NM_ADES", "LAST_HIT")) |>
+  select(FLTID, MST, TIME,
+         `Flown (NM)` = DIST_FLOWN_NM,
+         `GC from ADEP (NM)` = GC_FROM_ADEP_NM,
+         `GC to ADES (NM)` = GC_TO_ADES_NM) |>
+  arrange(FLTID, TIME) |>
+  knitr::kable(digits = 2, caption = "SBSV→SBGR: milestone positions")
+```
+
+```{r}
+#| label: plot-sbsv-sbgr
+#| fig-width: 11
+#| fig-height: 9
+
+# Step 3: Trajectory map for SBSV→SBGR
+df_sbsv_sbgr <- df_trajectories |>
+  filter(fid %in% sbsv_sbgr_fltids) |>
+  drop_na(longitude, latitude)
+
+apt_sbsv_sbgr <- df_sbsv_sbgr |>
+  distinct(
+    adep, ades,
+    lon_adep = longitude_adep, lat_adep = latitude_adep,
+    lon_ades = longitude_ades, lat_ades = latitude_ades
+  ) |> slice_head(n = 1)
+
+# Brazil map
+brazil <- rnaturalearth::ne_countries(country = "Brazil", scale = "medium", returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = brazil, fill = "grey95", color = "grey60") +
+  geom_path(data = df_sbsv_sbgr,
+            aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
+            linewidth = 0.8, alpha = 0.8) +
+  geom_point(data = apt_sbsv_sbgr,
+             aes(x = lon_adep, y = lat_adep), color = "green", size = 4, shape = 17) +
+  geom_point(data = apt_sbsv_sbgr,
+             aes(x = lon_ades, y = lat_ades), color = "red", size = 4, shape = 17) +
+  geom_text(data = apt_sbsv_sbgr,
+            aes(x = lon_adep, y = lat_adep, label = adep), vjust = -1, color = "darkgreen", fontface = "bold") +
+  geom_text(data = apt_sbsv_sbgr,
+            aes(x = lon_ades, y = lat_ades, label = ades), vjust = -1, color = "darkred", fontface = "bold") +
+  coord_sf(
+    xlim = c(min(df_sbsv_sbgr$longitude) - 2, max(df_sbsv_sbgr$longitude) + 2),
+    ylim = c(min(df_sbsv_sbgr$latitude) - 2, max(df_sbsv_sbgr$latitude) + 2)
+  ) +
+  labs(
+    title = "SBSV → SBGR trajectories",
+    subtitle = "Salvador → São Paulo (Guarulhos)",
+    x = "Longitude", y = "Latitude", color = "Flight ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: investigate-sbsv-sbgr-gc
+
+# Step 4: How far does gc_to_ades actually go for these flights?
+# Check if 40NM_ADES milestone is far from ADES (route longer than expected)
+df_with_gc |>
+  filter(fid %in% sbsv_sbgr_fltids) |>
+  group_by(fid) |>
+  summarise(
+    total_flown_nm = max(cum_dist, na.rm = TRUE),
+    gc_adep_to_ades = first(gc_to_ades),      # GC at first point ≈ total GC distance
+    max_gc_from_adep = max(gc_from_adep, na.rm = TRUE),
+    min_gc_to_ades = min(gc_to_ades, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    extra_flown_nm = total_flown_nm - gc_adep_to_ades,
+    hfe_approx = (gc_adep_to_ades / total_flown_nm) * 100
+  ) |>
+  knitr::kable(digits = 2, caption = "SBSV→SBGR: raw trajectory stats (gate-to-gate)")
+```
