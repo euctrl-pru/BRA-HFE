@@ -931,3 +931,37 @@ if (nrow(flight_comparison) > 0) {
   cat("No flights matched between datasets")
 }
 ```
+
+```{r}
+#| label: comparison-by-pair
+
+# Breakdown by aerodrome pair — valid flights only
+flight_comparison |>
+  filter(valid == TRUE) |>
+  mutate(
+    bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
+    bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100,
+    hfe_diff_v1 = our_hfe_40nm - bra_hfe_v1_pct,
+    hfe_diff_v2 = our_hfe_v2 - bra_hfe_v2_pct,
+    dist_diff_v1 = our_flown_dist_nm - bra_dist_flown_v1_nm,
+    dist_diff_v2 = our_flown_dist_v2_nm - bra_dist_flown_v2_nm
+  ) |>
+  group_by(ADEP, ADES) |>
+  summarise(
+    n = n(),
+    mean_our_hfe_v1  = mean(our_hfe_40nm,   na.rm = TRUE),
+    mean_bra_hfe_v1  = mean(bra_hfe_v1_pct, na.rm = TRUE),
+    mean_diff_v1     = mean(hfe_diff_v1,     na.rm = TRUE),
+    mean_our_hfe_v2  = mean(our_hfe_v2,      na.rm = TRUE),
+    mean_bra_hfe_v2  = mean(bra_hfe_v2_pct,  na.rm = TRUE),
+    mean_diff_v2     = mean(hfe_diff_v2,      na.rm = TRUE),
+    mean_dist_diff_v1 = mean(dist_diff_v1,   na.rm = TRUE),
+    mean_dist_diff_v2 = mean(dist_diff_v2,   na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(abs(mean_diff_v2))) |>
+  knitr::kable(
+    digits = 2,
+    caption = "HFE comparison by aerodrome pair (valid flights only) — positive diff = our HFE higher than BRA"
+  )
+```
