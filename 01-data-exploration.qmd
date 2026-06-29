@@ -655,10 +655,10 @@ circle_nm <- function(lat0, lon0, radius_nm, n = 180) {
 }
 
 # Generic horizontal trajectory map for any set of flight IDs.
-# Shows: base map, actual trajectories, 40 NM exclusion circles,
-# reference GC line between 40NM_ADEP and 40NM_ADES milestones,
-# and milestone crossing points (N and X).
-plot_investigation_horizontal <- function(flt_ids, title_str = NULL, subtitle_str = NULL) {
+# radius_nm: 40 (V1 symmetric), 100, or c(40, 100) for both circles.
+# Shows: base map, actual trajectories, exclusion circles, reference GC line, milestone points.
+plot_investigation_horizontal <- function(flt_ids, radius_nm = 40,
+                                          title_str = NULL, subtitle_str = NULL) {
   df_traj <- df_trajectories |>
     filter(fid %in% flt_ids) |>
     drop_na(longitude, latitude)
@@ -669,15 +669,26 @@ plot_investigation_horizontal <- function(flt_ids, title_str = NULL, subtitle_st
              lon_ades = longitude_ades, lat_ades = latitude_ades) |>
     slice_head(n = 1)
 
-  circ_adep <- circle_nm(apt$lat_adep, apt$lon_adep, 40)
-  circ_ades <- circle_nm(apt$lat_ades, apt$lon_ades, 40)
+  # Build one circle per radius per airport
+  circles <- purrr::map_dfr(radius_nm, function(r) {
+    bind_rows(
+      circle_nm(apt$lat_adep, apt$lon_adep, r) |> mutate(airport = "ADEP", r = r),
+      circle_nm(apt$lat_ades, apt$lon_ades, r) |> mutate(airport = "ADES", r = r)
+    )
+  })
+
+  # Milestone labels depend on the first radius supplied (used for reference line)
+  r_adep <- radius_nm[1]
+  r_ades <- if (length(radius_nm) > 1) radius_nm[2] else radius_nm[1]
+  ms_adep <- paste0(r_adep, "NM_ADEP")
+  ms_ades <- paste0(r_ades, "NM_ADES")
 
   ref_segs <- df_milestones |>
-    filter(FLTID %in% flt_ids, MST %in% c("40NM_ADEP", "40NM_ADES")) |>
+    filter(FLTID %in% flt_ids, MST %in% c(ms_adep, ms_ades)) |>
     select(FLTID, MST, LON, LAT) |>
     pivot_wider(names_from = MST, values_from = c(LON, LAT)) |>
-    rename(lon_n = `LON_40NM_ADEP`, lat_n = `LAT_40NM_ADEP`,
-           lon_x = `LON_40NM_ADES`, lat_x = `LAT_40NM_ADES`) |>
+    rename(lon_n = !!paste0("LON_", ms_adep), lat_n = !!paste0("LAT_", ms_adep),
+           lon_x = !!paste0("LON_", ms_ades), lat_x = !!paste0("LAT_", ms_ades)) |>
     drop_na()
 
   ms_pts <- ref_segs |>
@@ -692,15 +703,15 @@ plot_investigation_horizontal <- function(flt_ids, title_str = NULL, subtitle_st
   xlim <- c(min(df_traj$longitude) - pad, max(df_traj$longitude) + pad)
   ylim <- c(min(df_traj$latitude)  - pad, max(df_traj$latitude)  + pad)
 
+  r_label <- paste(radius_nm, collapse = " + ")
   ttl <- title_str    %||% paste0(apt$adep, " → ", apt$ades, " trajectories")
   sub <- subtitle_str %||%
-    "Dashed circles = 40 NM exclusion zone  |  Dotted line = reference GC (N→X)"
+    paste0("Dashed circles = ", r_label, " NM exclusion zone  |  Dotted line = reference GC (N→X)")
 
   ggplot() +
     geom_sf(data = brazil, fill = "grey95", color = "grey60") +
-    geom_path(data = circ_adep, aes(x = lon, y = lat),
-              color = "#f5a623", linewidth = 0.9, linetype = "dashed") +
-    geom_path(data = circ_ades, aes(x = lon, y = lat),
+    geom_path(data = circles,
+              aes(x = lon, y = lat, group = interaction(airport, r)),
               color = "#f5a623", linewidth = 0.9, linetype = "dashed") +
     geom_segment(data = ref_segs,
                  aes(x = lon_n, y = lat_n, xend = lon_x, yend = lat_x,
