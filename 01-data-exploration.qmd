@@ -426,7 +426,7 @@ extract_all_milestones <- function(.df) {
     mutate(mst = "FIRST_HIT")
   milestone_list[[length(milestone_list) + 1]] <- first_hit
 
-  # Standard milestone pairs
+  # v1 milestones: 40NM from ADEP, 40NM to ADES (symmetric)
   for (target_nm in c(40, 100)) {
 
     # FROM ADEP: First point where distance FROM ADEP >= target (NM)
@@ -449,6 +449,20 @@ extract_all_milestones <- function(.df) {
       milestone_list[[length(milestone_list) + 1]] <- ms_to
     }
   }
+
+  # v2 milestone: 40NM from ADEP + 100NM to ADES (asymmetric)
+  ms_v2_adep <- .df |>
+    filter(gc_from_adep >= 40) |>
+    slice_head(n = 1) |>
+    mutate(mst = "40NM_ADEP_V2")
+
+  ms_v2_ades <- .df |>
+    filter(gc_to_ades >= 100) |>
+    slice_tail(n = 1) |>
+    mutate(mst = "100NM_ADES_V2")
+
+  if (nrow(ms_v2_adep) > 0) milestone_list[[length(milestone_list) + 1]] <- ms_v2_adep
+  if (nrow(ms_v2_ades) > 0) milestone_list[[length(milestone_list) + 1]] <- ms_v2_ades
 
   # LAST_HIT: Last trajectory point (proxy for landing)
   last_hit <- .df |>
@@ -570,10 +584,45 @@ hfe_100nm <- df_milestones |>
   ) |>
   filter(flown_dist_nm > 0)  # Remove routes too short for this milestone pair
 
+# Calculate HFE for V2 milestone pair (40NM ADEP + 100NM ADES, asymmetric)
+hfe_v2 <- df_milestones |>
+  filter(FLTID %in% complete_flights) |>
+  filter(MST %in% c("FIRST_HIT", "40NM_ADEP_V2", "100NM_ADES_V2", "LAST_HIT")) |>
+  group_by(FLTID, ADEP, ADES) |>
+  filter(sum(MST %in% c("40NM_ADEP_V2", "100NM_ADES_V2")) == 2) |>  # Both V2 milestones must exist
+  summarise(
+    # Takeoff/landing proxies
+    takeoff_time = TIME[MST == "FIRST_HIT"][1],
+    landing_time = TIME[MST == "LAST_HIT"][1],
+    # V2 milestone points
+    start_time = TIME[MST == "40NM_ADEP_V2"][1],
+    end_time = TIME[MST == "100NM_ADES_V2"][1],
+    start_lat = LAT[MST == "40NM_ADEP_V2"][1],
+    start_lon = LON[MST == "40NM_ADEP_V2"][1],
+    end_lat = LAT[MST == "100NM_ADES_V2"][1],
+    end_lon = LON[MST == "100NM_ADES_V2"][1],
+    dist_start = DIST_FLOWN_NM[MST == "40NM_ADEP_V2"][1],
+    dist_end = DIST_FLOWN_NM[MST == "100NM_ADES_V2"][1],
+    gc_from_adep_start = GC_FROM_ADEP_NM[MST == "40NM_ADEP_V2"][1],
+    gc_to_ades_end = GC_TO_ADES_NM[MST == "100NM_ADES_V2"][1],
+    .groups = "drop"
+  ) |>
+  mutate(
+    # Flown distance along trajectory between milestones (NM)
+    flown_dist_nm = dist_end - dist_start,
+    # Achieved distance: GC between milestone points (NM)
+    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
+    # HFE: achieved / flown
+    hfe_v2 = (achieved_dist_nm / flown_dist_nm) * 100,
+    milestone_pair = "V2 (40+100NM)"
+  ) |>
+  filter(flown_dist_nm > 0)  # Remove routes too short for this milestone pair
+
 # Summary statistics
 bind_rows(
   hfe_40nm |> select(FLTID, ADEP, ADES, milestone_pair, hfe = hfe_40nm),
-  hfe_100nm |> select(FLTID, ADEP, ADES, milestone_pair, hfe = hfe_100nm)
+  hfe_100nm |> select(FLTID, ADEP, ADES, milestone_pair, hfe = hfe_100nm),
+  hfe_v2 |> select(FLTID, ADEP, ADES, milestone_pair, hfe = hfe_v2)
 ) |>
   group_by(milestone_pair) |>
   summarise(
@@ -790,6 +839,10 @@ flight_comparison <- hfe_40nm |>
     our_flown_dist_nm = flown_dist_nm
   ) |>
   left_join(
+    hfe_v2 |> select(FLTID, our_hfe_v2 = hfe_v2, our_flown_dist_v2_nm = flown_dist_nm),
+    by = "FLTID"
+  ) |>
+  left_join(
     bra_hfe_sample |>
       mutate(
         bra_time = lubridate::as_datetime(time),
@@ -835,10 +888,12 @@ flight_comparison |>
     `Δ Time (min)` = time_diff_min,
     `Valid` = valid,
     `Dist Diff (NM)` = dist_diff_nm,
-    `Our HFE (%)` = our_hfe_40nm,
+    `Our HFE v1 (%)` = our_hfe_40nm,
+    `Our HFE v2 (%)` = our_hfe_v2,
     `BRA HFE v1 (%)` = bra_hfe_v1_pct,
     `BRA HFE v2 (%)` = bra_hfe_v2_pct,
-    `Our Flown (NM)` = our_flown_dist_nm,
+    `Our Flown v1 (NM)` = our_flown_dist_nm,
+    `Our Flown v2 (NM)` = our_flown_dist_v2_nm,
     `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm,
     `BRA Dist v2 (NM)` = bra_dist_flown_v2_nm
   ) |>
@@ -863,9 +918,9 @@ if (nrow(flight_comparison) > 0) {
     summarise(
       n_flights = n(),
       mean_hfe_diff_v1 = mean(abs(our_hfe_40nm - bra_hfe_v1_pct), na.rm = TRUE),
-      mean_hfe_diff_v2 = mean(abs(our_hfe_40nm - bra_hfe_v2_pct), na.rm = TRUE),
+      mean_hfe_diff_v2 = mean(abs(our_hfe_v2 - bra_hfe_v2_pct), na.rm = TRUE),
       mean_dist_diff_v1 = mean(abs(our_flown_dist_nm - bra_dist_flown_v1_nm), na.rm = TRUE),
-      mean_dist_diff_v2 = mean(abs(our_flown_dist_nm - bra_dist_flown_v2_nm), na.rm = TRUE),
+      mean_dist_diff_v2 = mean(abs(our_flown_dist_v2_nm - bra_dist_flown_v2_nm), na.rm = TRUE),
       .groups = "drop"
     ) |>
     knitr::kable(
