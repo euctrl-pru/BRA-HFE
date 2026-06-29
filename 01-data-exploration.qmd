@@ -374,27 +374,24 @@ Milestones are defined by **great circle distance from aerodrome reference point
 
 - Distance FROM ADEP: GC distance from departure airport position
 - Distance TO ADES: GC distance to arrival airport position
-- DIST_FLOWN: Cumulative distance along actual trajectory (from first point)
+- DIST_FLOWN_NM: Cumulative distance along actual trajectory (from first point, in NM)
 
 ```{r}
 #| label: calculate-milestones
 
-# Function to calculate great circle distance (Haversine)
+# Function to calculate great circle distance (Haversine) — returns NM
 great_circle_distance <- function(lat1, lon1, lat2, lon2) {
-  # Earth radius in meters
-  R <- 6371000
+  R_nm <- 3440.065  # Earth radius in NM
 
-  # Convert to radians
   lat1_rad <- lat1 * pi / 180
   lat2_rad <- lat2 * pi / 180
   dLat <- (lat2 - lat1) * pi / 180
   dLon <- (lon2 - lon1) * pi / 180
 
-  # Haversine formula
   a <- sin(dLat/2)^2 + cos(lat1_rad) * cos(lat2_rad) * sin(dLon/2)^2
   c <- 2 * atan2(sqrt(a), sqrt(1-a))
 
-  d <- R * c
+  d <- R_nm * c
   return(d)
 }
 
@@ -404,14 +401,14 @@ df_with_gc <- df_trajectories |>
   arrange(timestamp) |>
   cumulative_distance() |>
   mutate(
-    # Rename cumulative_distance to cum_dist and convert to meters
-    cum_dist = cumulative_distance * 1000,
-    # GC distance from ADEP ARP
+    # cumulative_distance from trrrj is in km — convert to NM
+    cum_dist = cumulative_distance / 1.852,
+    # GC distance from ADEP ARP (NM)
     gc_from_adep = great_circle_distance(
       latitude_adep, longitude_adep,
       latitude, longitude
     ),
-    # GC distance to ADES ARP
+    # GC distance to ADES ARP (NM)
     gc_to_ades = great_circle_distance(
       latitude, longitude,
       latitude_ades, longitude_ades
@@ -431,11 +428,10 @@ extract_all_milestones <- function(.df) {
 
   # Standard milestone pairs
   for (target_nm in c(40, 100)) {
-    target_m <- target_nm * 1852
 
-    # FROM ADEP: First point where distance FROM ADEP >= target
+    # FROM ADEP: First point where distance FROM ADEP >= target (NM)
     ms_from <- .df |>
-      filter(gc_from_adep >= target_m) |>
+      filter(gc_from_adep >= target_nm) |>
       slice_head(n = 1) |>
       mutate(mst = paste0(target_nm, "NM_ADEP"))
 
@@ -443,10 +439,9 @@ extract_all_milestones <- function(.df) {
       milestone_list[[length(milestone_list) + 1]] <- ms_from
     }
 
-    # TO ADES: Last point where distance TO ADES >= target
-    # (distance TO ADES decreases as flight progresses toward destination)
+    # TO ADES: Last point where distance TO ADES >= target (NM)
     ms_to <- .df |>
-      filter(gc_to_ades >= target_m) |>
+      filter(gc_to_ades >= target_nm) |>
       slice_tail(n = 1) |>
       mutate(mst = paste0(target_nm, "NM_ADES"))
 
@@ -477,10 +472,10 @@ df_milestones <- df_with_gc |>
     LAT = latitude,
     LON = longitude,
     ALT = altitude,
-    DIST_FLOWN = cum_dist,
+    DIST_FLOWN_NM = cum_dist,
     MST = mst,
-    GC_FROM_ADEP = gc_from_adep,
-    GC_TO_ADES = gc_to_ades
+    GC_FROM_ADEP_NM = gc_from_adep,
+    GC_TO_ADES_NM = gc_to_ades
   )
 
 # Preview milestone table
@@ -518,21 +513,19 @@ hfe_40nm <- df_milestones |>
     start_lon = LON[MST == "40NM_ADEP"][1],
     end_lat = LAT[MST == "40NM_ADES"][1],
     end_lon = LON[MST == "40NM_ADES"][1],
-    dist_start = DIST_FLOWN[MST == "40NM_ADEP"][1],
-    dist_end = DIST_FLOWN[MST == "40NM_ADES"][1],
-    gc_from_adep_start = GC_FROM_ADEP[MST == "40NM_ADEP"][1],
-    gc_to_ades_end = GC_TO_ADES[MST == "40NM_ADES"][1],
+    dist_start = DIST_FLOWN_NM[MST == "40NM_ADEP"][1],
+    dist_end = DIST_FLOWN_NM[MST == "40NM_ADES"][1],
+    gc_from_adep_start = GC_FROM_ADEP_NM[MST == "40NM_ADEP"][1],
+    gc_to_ades_end = GC_TO_ADES_NM[MST == "40NM_ADES"][1],
     .groups = "drop"
   ) |>
   mutate(
-    # Flown distance along trajectory between milestones
-    flown_dist_m = dist_end - dist_start,
-    flown_dist_nm = flown_dist_m / 1852,
-    # Achieved distance: GC between milestone points
-    achieved_dist_m = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
-    achieved_dist_nm = achieved_dist_m / 1852,
+    # Flown distance along trajectory between milestones (NM)
+    flown_dist_nm = dist_end - dist_start,
+    # Achieved distance: GC between milestone points (NM)
+    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
     # HFE: achieved / flown
-    hfe_40nm = (achieved_dist_m / flown_dist_m) * 100,
+    hfe_40nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "40NM"
   )
 
@@ -552,21 +545,19 @@ hfe_100nm <- df_milestones |>
     start_lon = LON[MST == "100NM_ADEP"][1],
     end_lat = LAT[MST == "100NM_ADES"][1],
     end_lon = LON[MST == "100NM_ADES"][1],
-    dist_start = DIST_FLOWN[MST == "100NM_ADEP"][1],
-    dist_end = DIST_FLOWN[MST == "100NM_ADES"][1],
-    gc_from_adep_start = GC_FROM_ADEP[MST == "100NM_ADEP"][1],
-    gc_to_ades_end = GC_TO_ADES[MST == "100NM_ADES"][1],
+    dist_start = DIST_FLOWN_NM[MST == "100NM_ADEP"][1],
+    dist_end = DIST_FLOWN_NM[MST == "100NM_ADES"][1],
+    gc_from_adep_start = GC_FROM_ADEP_NM[MST == "100NM_ADEP"][1],
+    gc_to_ades_end = GC_TO_ADES_NM[MST == "100NM_ADES"][1],
     .groups = "drop"
   ) |>
   mutate(
-    # Flown distance along trajectory between milestones
-    flown_dist_m = dist_end - dist_start,
-    flown_dist_nm = flown_dist_m / 1852,
-    # Achieved distance: GC between milestone points
-    achieved_dist_m = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
-    achieved_dist_nm = achieved_dist_m / 1852,
+    # Flown distance along trajectory between milestones (NM)
+    flown_dist_nm = dist_end - dist_start,
+    # Achieved distance: GC between milestone points (NM)
+    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
     # HFE: achieved / flown
-    hfe_100nm = (achieved_dist_m / flown_dist_m) * 100,
+    hfe_100nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "100NM"
   )
 
@@ -629,12 +620,6 @@ The table below shows the extracted milestone positions for the example flights,
 df_milestones |>
   filter(FLTID %in% example_flights) |>
   arrange(ADEP, ADES, FLTID, TIME) |>
-  mutate(
-    # Convert distances to NM for readability
-    DIST_FLOWN_NM = DIST_FLOWN / 1852,
-    GC_FROM_ADEP_NM = GC_FROM_ADEP / 1852,
-    GC_TO_ADES_NM = GC_TO_ADES / 1852
-  ) |>
   select(
     FLTID, ADEP, ADES, MST, TIME,
     LAT, LON, ALT,
