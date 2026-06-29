@@ -979,19 +979,22 @@ SBSV→SBGR shows a systematic −7.19% difference (our HFE 91.64% vs BRA 98.83%
 flight_comparison |>
   filter(valid == TRUE, ADEP == "SBSV", ADES == "SBGR") |>
   mutate(
-    bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100
+    bra_hfe_v1_pct  = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
+    # BRA achieved GC = flown * (hfe/100)
+    bra_achieved_nm = bra_dist_flown_v1_nm * (bra_hfe_v1_pct / 100),
+    hfe_diff        = our_hfe_40nm - bra_hfe_v1_pct
   ) |>
   select(
     FLTID,
-    `Our HFE v1 (%)` = our_hfe_40nm,
-    `BRA HFE v1 (%)` = bra_hfe_v1_pct,
-    `Diff (%)` = our_flown_dist_nm,
-    `Our Flown (NM)` = our_flown_dist_nm,
-    `BRA Flown (NM)` = bra_dist_flown_v1_nm,
-    `Our Achieved (NM)` = our_achieved_dist_nm,
-    `Takeoff` = our_time
+    `Takeoff`          = our_time,
+    `Our Flown (NM)`   = our_flown_dist_nm,
+    `BRA Flown (NM)`   = bra_dist_flown_v1_nm,
+    `Our Achieved (NM)`= our_achieved_dist_nm,
+    `BRA Achieved (NM)`= bra_achieved_nm,
+    `Our HFE v1 (%)`   = our_hfe_40nm,
+    `BRA HFE v1 (%)`   = bra_hfe_v1_pct,
+    `Diff (%)`         = hfe_diff
   ) |>
-  mutate(`Diff (%)` = `Our HFE v1 (%)` - `BRA HFE v1 (%)`) |>
   arrange(`Diff (%)`) |>
   knitr::kable(digits = 2, caption = "SBSV→SBGR: flight-by-flight comparison")
 ```
