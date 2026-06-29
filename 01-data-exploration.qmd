@@ -809,18 +809,22 @@ flight_comparison <- hfe_40nm |>
   group_by(FLTID) |>
   slice_min(time_diff_min, n = 1) |>
   ungroup() |>
-  filter(time_diff_min <= 60)  # Keep only matches within 1 hour
+  filter(time_diff_min <= 15)  # Keep only matches within 15 minutes
 
 flight_comparison |>
+  mutate(
+    # kpi05_v1/v2 is additional NM flown — convert to HFE percentage
+    bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
+    bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100
+  ) |>
   select(
     FLTID, ADEP, ADES,
     `Our Takeoff` = our_time,
     `BRA Time` = bra_time,
     `Δ Time (min)` = time_diff_min,
     `Our HFE (%)` = our_hfe_40nm,
-    `BRA HFE v1 (%)` = bra_hfe_v1,
-    `BRA HFE v2 (%)` = bra_hfe_v2,
-    `Our Achieved (NM)` = our_achieved_dist_nm,
+    `BRA HFE v1 (%)` = bra_hfe_v1_pct,
+    `BRA HFE v2 (%)` = bra_hfe_v2_pct,
     `Our Flown (NM)` = our_flown_dist_nm,
     `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm,
     `BRA Dist v2 (NM)` = bra_dist_flown_v2_nm
@@ -838,10 +842,14 @@ flight_comparison |>
 # Summary statistics of differences
 if (nrow(flight_comparison) > 0) {
   flight_comparison |>
+    mutate(
+      bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
+      bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100
+    ) |>
     summarise(
       n_matched = n(),
-      mean_hfe_diff_v1 = mean(abs(our_hfe_40nm - bra_hfe_v1), na.rm = TRUE),
-      mean_hfe_diff_v2 = mean(abs(our_hfe_40nm - bra_hfe_v2), na.rm = TRUE),
+      mean_hfe_diff_v1 = mean(abs(our_hfe_40nm - bra_hfe_v1_pct), na.rm = TRUE),
+      mean_hfe_diff_v2 = mean(abs(our_hfe_40nm - bra_hfe_v2_pct), na.rm = TRUE),
       mean_dist_diff_v1 = mean(abs(our_flown_dist_nm - bra_dist_flown_v1_nm), na.rm = TRUE),
       mean_dist_diff_v2 = mean(abs(our_flown_dist_nm - bra_dist_flown_v2_nm), na.rm = TRUE)
     ) |>
