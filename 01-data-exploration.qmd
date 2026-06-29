@@ -638,6 +638,96 @@ bind_rows(
   )
 ```
 
+## Plotting helpers
+
+```{r}
+#| label: plotting-helpers
+
+# Generate a circle of radius_nm NM around (lat0, lon0)
+circle_nm <- function(lat0, lon0, radius_nm, n = 180) {
+  R_nm <- 3440.065
+  angles <- seq(0, 2 * pi, length.out = n + 1)
+  lat_r  <- lat0 * pi / 180
+  dlat   <- (radius_nm / R_nm) * (180 / pi)
+  dlon   <- dlat / cos(lat_r)
+  tibble(lon = lon0 + dlon * sin(angles),
+         lat = lat0 + dlat * cos(angles))
+}
+
+# Generic horizontal trajectory map for any set of flight IDs.
+# Shows: base map, actual trajectories, 40 NM exclusion circles,
+# reference GC line between 40NM_ADEP and 40NM_ADES milestones,
+# and milestone crossing points (N and X).
+plot_investigation_horizontal <- function(flt_ids, title_str = NULL, subtitle_str = NULL) {
+  df_traj <- df_trajectories |>
+    filter(fid %in% flt_ids) |>
+    drop_na(longitude, latitude)
+
+  apt <- df_traj |>
+    distinct(adep, ades,
+             lon_adep = longitude_adep, lat_adep = latitude_adep,
+             lon_ades = longitude_ades, lat_ades = latitude_ades) |>
+    slice_head(n = 1)
+
+  circ_adep <- circle_nm(apt$lat_adep, apt$lon_adep, 40)
+  circ_ades <- circle_nm(apt$lat_ades, apt$lon_ades, 40)
+
+  ref_segs <- df_milestones |>
+    filter(FLTID %in% flt_ids, MST %in% c("40NM_ADEP", "40NM_ADES")) |>
+    select(FLTID, MST, LON, LAT) |>
+    pivot_wider(names_from = MST, values_from = c(LON, LAT)) |>
+    rename(lon_n = `LON_40NM_ADEP`, lat_n = `LAT_40NM_ADEP`,
+           lon_x = `LON_40NM_ADES`, lat_x = `LAT_40NM_ADES`) |>
+    drop_na()
+
+  ms_pts <- ref_segs |>
+    pivot_longer(cols = c(lon_n, lat_n, lon_x, lat_x),
+                 names_to  = c(".value", "ms"),
+                 names_pattern = "(lon|lat)_(n|x)")
+
+  brazil <- rnaturalearth::ne_countries(country = "Brazil",
+                                        scale = "medium", returnclass = "sf")
+
+  pad  <- 2
+  xlim <- c(min(df_traj$longitude) - pad, max(df_traj$longitude) + pad)
+  ylim <- c(min(df_traj$latitude)  - pad, max(df_traj$latitude)  + pad)
+
+  ttl <- title_str    %||% paste0(apt$adep, " → ", apt$ades, " trajectories")
+  sub <- subtitle_str %||%
+    "Dashed circles = 40 NM exclusion zone  |  Dotted line = reference GC (N→X)"
+
+  ggplot() +
+    geom_sf(data = brazil, fill = "grey95", color = "grey60") +
+    geom_path(data = circ_adep, aes(x = lon, y = lat),
+              color = "#f5a623", linewidth = 0.9, linetype = "dashed") +
+    geom_path(data = circ_ades, aes(x = lon, y = lat),
+              color = "#f5a623", linewidth = 0.9, linetype = "dashed") +
+    geom_segment(data = ref_segs,
+                 aes(x = lon_n, y = lat_n, xend = lon_x, yend = lat_x,
+                     color = as.factor(FLTID)),
+                 linewidth = 1, linetype = "dotted", alpha = 0.9) +
+    geom_path(data = df_traj,
+              aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
+              linewidth = 0.8, alpha = 0.8) +
+    geom_point(data = ms_pts,
+               aes(x = lon, y = lat, color = as.factor(FLTID)),
+               shape = 21, fill = "white", size = 3, stroke = 1.2) +
+    geom_point(data = apt, aes(x = lon_adep, y = lat_adep),
+               color = "black", size = 4, shape = 17) +
+    geom_point(data = apt, aes(x = lon_ades, y = lat_ades),
+               color = "black", size = 4, shape = 17) +
+    geom_text(data = apt, aes(x = lon_adep, y = lat_adep, label = adep),
+              vjust = -1, fontface = "bold") +
+    geom_text(data = apt, aes(x = lon_ades, y = lat_ades, label = ades),
+              vjust = -1, fontface = "bold") +
+    coord_sf(xlim = xlim, ylim = ylim) +
+    labs(title = ttl, subtitle = sub,
+         x = "Longitude", y = "Latitude", color = "Flight ID") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+```
+
 ## Example Visualizations
 
 Visualize sample trajectories for two aerodrome pairs: SBCF-SBKP and SBBR-SBSV.
@@ -709,19 +799,6 @@ apt_sbcf_sbkp <- df_sbcf_sbkp |>
     lon_ades = longitude_ades, lat_ades = latitude_ades,
     name_adep, name_ades
   )
-
-# Helper: generate a circle of radius_nm around (lat0, lon0) as a data.frame of lon/lat points
-circle_nm <- function(lat0, lon0, radius_nm, n = 180) {
-  R_nm <- 3440.065
-  angles <- seq(0, 2 * pi, length.out = n + 1)
-  lat_r  <- lat0  * pi / 180
-  dlat   <- (radius_nm / R_nm) * (180 / pi)
-  dlon   <- dlat / cos(lat_r)
-  tibble(
-    lon = lon0 + dlon * sin(angles),
-    lat = lat0 + dlat * cos(angles)
-  )
-}
 
 # 40 NM exclusion circles around ADEP and ADES
 circle_adep <- circle_nm(apt_sbcf_sbkp$lat_adep, apt_sbcf_sbkp$lon_adep, 40)
@@ -1078,45 +1155,12 @@ df_milestones |>
 #| fig-width: 11
 #| fig-height: 9
 
-# Step 3: Trajectory map for SBSV→SBGR
-df_sbsv_sbgr <- df_trajectories |>
-  filter(fid %in% sbsv_sbgr_fltids) |>
-  drop_na(longitude, latitude)
-
-apt_sbsv_sbgr <- df_sbsv_sbgr |>
-  distinct(
-    adep, ades,
-    lon_adep = longitude_adep, lat_adep = latitude_adep,
-    lon_ades = longitude_ades, lat_ades = latitude_ades
-  ) |> slice_head(n = 1)
-
-# Brazil map
-brazil <- rnaturalearth::ne_countries(country = "Brazil", scale = "medium", returnclass = "sf")
-
-ggplot() +
-  geom_sf(data = brazil, fill = "grey95", color = "grey60") +
-  geom_path(data = df_sbsv_sbgr,
-            aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
-            linewidth = 0.8, alpha = 0.8) +
-  geom_point(data = apt_sbsv_sbgr,
-             aes(x = lon_adep, y = lat_adep), color = "green", size = 4, shape = 17) +
-  geom_point(data = apt_sbsv_sbgr,
-             aes(x = lon_ades, y = lat_ades), color = "red", size = 4, shape = 17) +
-  geom_text(data = apt_sbsv_sbgr,
-            aes(x = lon_adep, y = lat_adep, label = adep), vjust = -1, color = "darkgreen", fontface = "bold") +
-  geom_text(data = apt_sbsv_sbgr,
-            aes(x = lon_ades, y = lat_ades, label = ades), vjust = -1, color = "darkred", fontface = "bold") +
-  coord_sf(
-    xlim = c(min(df_sbsv_sbgr$longitude) - 2, max(df_sbsv_sbgr$longitude) + 2),
-    ylim = c(min(df_sbsv_sbgr$latitude) - 2, max(df_sbsv_sbgr$latitude) + 2)
-  ) +
-  labs(
-    title = "SBSV → SBGR trajectories",
-    subtitle = "Salvador → São Paulo (Guarulhos)",
-    x = "Longitude", y = "Latitude", color = "Flight ID"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
+# Step 3: Trajectory map for SBSV→SBGR with reference lines and exclusion circles
+plot_investigation_horizontal(
+  sbsv_sbgr_fltids,
+  title_str    = "SBSV → SBGR trajectories",
+  subtitle_str = "Salvador → São Paulo (Guarulhos)  |  Dashed circles = 40 NM  |  Dotted = reference GC"
+)
 ```
 
 ```{r}
