@@ -816,7 +816,11 @@ flight_comparison <- hfe_40nm |>
   group_by(FLTID) |>
   slice_min(time_diff_min, n = 1) |>
   ungroup() |>
-  filter(time_diff_min <= 15)  # Keep only matches within 15 minutes
+  filter(time_diff_min <= 15) |>  # Keep only matches within 15 minutes
+  mutate(
+    dist_diff_nm = abs(our_flown_dist_nm - bra_dist_flown_v1_nm),
+    valid = dist_diff_nm <= 50  # Flag: TRUE = trajectory consistent with BRA reference
+  )
 
 flight_comparison |>
   mutate(
@@ -829,12 +833,12 @@ flight_comparison |>
     `Our Takeoff` = our_time,
     `BRA Time` = bra_time,
     `Δ Time (min)` = time_diff_min,
+    `Valid` = valid,
+    `Dist Diff (NM)` = dist_diff_nm,
     `Our HFE (%)` = our_hfe_40nm,
     `BRA HFE v1 (%)` = bra_hfe_v1_pct,
-    `BRA HFE v2 (%)` = bra_hfe_v2_pct,
     `Our Flown (NM)` = our_flown_dist_nm,
-    `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm,
-    `BRA Dist v2 (NM)` = bra_dist_flown_v2_nm
+    `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm
   ) |>
   head(15) |>
   knitr::kable(
@@ -853,16 +857,16 @@ if (nrow(flight_comparison) > 0) {
       bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
       bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100
     ) |>
+    group_by(valid) |>
     summarise(
-      n_matched = n(),
+      n_flights = n(),
       mean_hfe_diff_v1 = mean(abs(our_hfe_40nm - bra_hfe_v1_pct), na.rm = TRUE),
-      mean_hfe_diff_v2 = mean(abs(our_hfe_40nm - bra_hfe_v2_pct), na.rm = TRUE),
       mean_dist_diff_v1 = mean(abs(our_flown_dist_nm - bra_dist_flown_v1_nm), na.rm = TRUE),
-      mean_dist_diff_v2 = mean(abs(our_flown_dist_nm - bra_dist_flown_v2_nm), na.rm = TRUE)
+      .groups = "drop"
     ) |>
     knitr::kable(
       digits = 2,
-      caption = "Mean absolute differences between our calculations and Brazil HFE"
+      caption = "Comparison stats by validity flag (threshold: 50 NM distance difference)"
     )
 } else {
   cat("No flights matched between datasets")
