@@ -450,18 +450,12 @@ extract_all_milestones <- function(.df) {
     }
   }
 
-  # v2 milestone: 40NM from ADEP + 100NM to ADES (asymmetric)
-  ms_v2_adep <- .df |>
-    filter(gc_from_adep >= 40) |>
-    slice_head(n = 1) |>
-    mutate(mst = "40NM_ADEP_V2")
-
+  # v2 extra milestone: 100NM to ADES (40NM_ADEP is shared with v1)
   ms_v2_ades <- .df |>
     filter(gc_to_ades >= 100) |>
     slice_tail(n = 1) |>
     mutate(mst = "100NM_ADES_V2")
 
-  if (nrow(ms_v2_adep) > 0) milestone_list[[length(milestone_list) + 1]] <- ms_v2_adep
   if (nrow(ms_v2_ades) > 0) milestone_list[[length(milestone_list) + 1]] <- ms_v2_ades
 
   # LAST_HIT: Last trajectory point (proxy for landing)
@@ -500,6 +494,17 @@ df_milestones |>
     digits = 2,
     caption = "Milestone table (first 20 rows)"
   )
+```
+
+```{r}
+#| label: check-milestones
+
+# Verify which MST labels exist and how many flights have each
+df_milestones |>
+  group_by(MST) |>
+  summarise(n_flights = n_distinct(FLTID), n_rows = n(), .groups = "drop") |>
+  arrange(MST) |>
+  knitr::kable(caption = "Milestone types present in df_milestones")
 ```
 
 ### HFE Calculation
@@ -585,25 +590,26 @@ hfe_100nm <- df_milestones |>
   filter(flown_dist_nm > 0)  # Remove routes too short for this milestone pair
 
 # Calculate HFE for V2 milestone pair (40NM ADEP + 100NM ADES, asymmetric)
+# Reuses 40NM_ADEP (same point as 40NM_ADEP_V2) + 100NM_ADES_V2 (new)
 hfe_v2 <- df_milestones |>
   filter(FLTID %in% complete_flights) |>
-  filter(MST %in% c("FIRST_HIT", "40NM_ADEP_V2", "100NM_ADES_V2", "LAST_HIT")) |>
+  filter(MST %in% c("FIRST_HIT", "40NM_ADEP", "100NM_ADES_V2", "LAST_HIT")) |>
   group_by(FLTID, ADEP, ADES) |>
-  filter(sum(MST %in% c("40NM_ADEP_V2", "100NM_ADES_V2")) == 2) |>  # Both V2 milestones must exist
+  filter(sum(MST %in% c("40NM_ADEP", "100NM_ADES_V2")) == 2) |>  # Both V2 milestones must exist
   summarise(
     # Takeoff/landing proxies
     takeoff_time = TIME[MST == "FIRST_HIT"][1],
     landing_time = TIME[MST == "LAST_HIT"][1],
     # V2 milestone points
-    start_time = TIME[MST == "40NM_ADEP_V2"][1],
+    start_time = TIME[MST == "40NM_ADEP"][1],
     end_time = TIME[MST == "100NM_ADES_V2"][1],
-    start_lat = LAT[MST == "40NM_ADEP_V2"][1],
-    start_lon = LON[MST == "40NM_ADEP_V2"][1],
+    start_lat = LAT[MST == "40NM_ADEP"][1],
+    start_lon = LON[MST == "40NM_ADEP"][1],
     end_lat = LAT[MST == "100NM_ADES_V2"][1],
     end_lon = LON[MST == "100NM_ADES_V2"][1],
-    dist_start = DIST_FLOWN_NM[MST == "40NM_ADEP_V2"][1],
+    dist_start = DIST_FLOWN_NM[MST == "40NM_ADEP"][1],
     dist_end = DIST_FLOWN_NM[MST == "100NM_ADES_V2"][1],
-    gc_from_adep_start = GC_FROM_ADEP_NM[MST == "40NM_ADEP_V2"][1],
+    gc_from_adep_start = GC_FROM_ADEP_NM[MST == "40NM_ADEP"][1],
     gc_to_ades_end = GC_TO_ADES_NM[MST == "100NM_ADES_V2"][1],
     .groups = "drop"
   ) |>
