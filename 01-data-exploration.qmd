@@ -837,8 +837,10 @@ flight_comparison |>
     `Dist Diff (NM)` = dist_diff_nm,
     `Our HFE (%)` = our_hfe_40nm,
     `BRA HFE v1 (%)` = bra_hfe_v1_pct,
+    `BRA HFE v2 (%)` = bra_hfe_v2_pct,
     `Our Flown (NM)` = our_flown_dist_nm,
-    `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm
+    `BRA Dist v1 (NM)` = bra_dist_flown_v1_nm,
+    `BRA Dist v2 (NM)` = bra_dist_flown_v2_nm
   ) |>
   head(15) |>
   knitr::kable(
@@ -861,7 +863,9 @@ if (nrow(flight_comparison) > 0) {
     summarise(
       n_flights = n(),
       mean_hfe_diff_v1 = mean(abs(our_hfe_40nm - bra_hfe_v1_pct), na.rm = TRUE),
+      mean_hfe_diff_v2 = mean(abs(our_hfe_40nm - bra_hfe_v2_pct), na.rm = TRUE),
       mean_dist_diff_v1 = mean(abs(our_flown_dist_nm - bra_dist_flown_v1_nm), na.rm = TRUE),
+      mean_dist_diff_v2 = mean(abs(our_flown_dist_nm - bra_dist_flown_v2_nm), na.rm = TRUE),
       .groups = "drop"
     ) |>
     knitr::kable(
