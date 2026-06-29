@@ -497,8 +497,14 @@ Calculate HFE indicator for each flight based on milestone pairs.
 ```{r}
 #| label: calculate-hfe
 
+# Keep only flights with complete trajectories (LAST_HIT within 50 NM of ADES)
+complete_flights <- df_milestones |>
+  filter(MST == "LAST_HIT", GC_TO_ADES_NM <= 50) |>
+  pull(FLTID)
+
 # Calculate HFE for 40 NM milestone pair
 hfe_40nm <- df_milestones |>
+  filter(FLTID %in% complete_flights) |>
   filter(MST %in% c("FIRST_HIT", "40NM_ADEP", "40NM_ADES", "LAST_HIT")) |>
   group_by(FLTID, ADEP, ADES) |>
   filter(sum(MST %in% c("40NM_ADEP", "40NM_ADES")) == 2) |>  # Both 40NM milestones must exist
@@ -532,6 +538,7 @@ hfe_40nm <- df_milestones |>
 
 # Calculate HFE for 100 NM milestone pair
 hfe_100nm <- df_milestones |>
+  filter(FLTID %in% complete_flights) |>
   filter(MST %in% c("FIRST_HIT", "100NM_ADEP", "100NM_ADES", "LAST_HIT")) |>
   group_by(FLTID, ADEP, ADES) |>
   filter(sum(MST %in% c("100NM_ADEP", "100NM_ADES")) == 2) |>  # Both 100NM milestones must exist
