@@ -710,25 +710,81 @@ apt_sbcf_sbkp <- df_sbcf_sbkp |>
     name_adep, name_ades
   )
 
+# Helper: generate a circle of radius_nm around (lat0, lon0) as a data.frame of lon/lat points
+circle_nm <- function(lat0, lon0, radius_nm, n = 180) {
+  R_nm <- 3440.065
+  angles <- seq(0, 2 * pi, length.out = n + 1)
+  lat_r  <- lat0  * pi / 180
+  dlat   <- (radius_nm / R_nm) * (180 / pi)
+  dlon   <- dlat / cos(lat_r)
+  tibble(
+    lon = lon0 + dlon * sin(angles),
+    lat = lat0 + dlat * cos(angles)
+  )
+}
+
+# 40 NM exclusion circles around ADEP and ADES
+circle_adep <- circle_nm(apt_sbcf_sbkp$lat_adep, apt_sbcf_sbkp$lon_adep, 40)
+circle_ades <- circle_nm(apt_sbcf_sbkp$lat_ades, apt_sbcf_sbkp$lon_ades, 40)
+
+# Reference segments: GC line between 40NM_ADEP and 40NM_ADES milestones, per flight
+ref_segments <- df_milestones |>
+  filter(FLTID %in% example_flights, ADEP == "SBCF", ADES == "SBKP") |>
+  filter(MST %in% c("40NM_ADEP", "40NM_ADES")) |>
+  select(FLTID, MST, LON, LAT) |>
+  pivot_wider(names_from = MST, values_from = c(LON, LAT)) |>
+  rename(
+    lon_n = `LON_40NM_ADEP`, lat_n = `LAT_40NM_ADEP`,
+    lon_x = `LON_40NM_ADES`, lat_x = `LAT_40NM_ADES`
+  ) |>
+  drop_na()
+
+# Milestone points (N and X) for labelling
+ms_points <- ref_segments |>
+  pivot_longer(
+    cols = c(lon_n, lat_n, lon_x, lat_x),
+    names_to = c(".value", "ms"),
+    names_pattern = "(lon|lat)_(n|x)"
+  )
+
 ggplot(df_sbcf_sbkp) +
+  # 40 NM circles (exclusion zones)
+  geom_path(data = circle_adep, aes(x = lon, y = lat),
+            color = "#f5a623", linewidth = 0.8, linetype = "dashed") +
+  geom_path(data = circle_ades, aes(x = lon, y = lat),
+            color = "#f5a623", linewidth = 0.8, linetype = "dashed") +
+  # Reference line (GC between milestones N → X) per flight
+  geom_segment(data = ref_segments,
+               aes(x = lon_n, y = lat_n, xend = lon_x, yend = lat_x,
+                   color = as.factor(FLTID)),
+               linewidth = 1, linetype = "dotted", alpha = 0.9) +
+  # Actual trajectories
   geom_path(aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
             linewidth = 0.8, alpha = 0.7) +
+  # Milestone points N and X
+  geom_point(data = ms_points,
+             aes(x = lon, y = lat, color = as.factor(FLTID)),
+             shape = 21, fill = "white", size = 3, stroke = 1.2) +
+  # Airport markers
   geom_point(data = apt_sbcf_sbkp,
              aes(x = lon_adep, y = lat_adep),
-             color = "green", size = 4, shape = 17) +
+             color = "black", size = 4, shape = 17) +
   geom_point(data = apt_sbcf_sbkp,
              aes(x = lon_ades, y = lat_ades),
-             color = "red", size = 4, shape = 17) +
+             color = "black", size = 4, shape = 17) +
   geom_text(data = apt_sbcf_sbkp,
             aes(x = lon_adep, y = lat_adep, label = adep),
-            vjust = -1, color = "green", fontface = "bold") +
+            vjust = -1, fontface = "bold") +
   geom_text(data = apt_sbcf_sbkp,
             aes(x = lon_ades, y = lat_ades, label = ades),
-            vjust = -1, color = "red", fontface = "bold") +
+            vjust = -1, fontface = "bold") +
   coord_fixed() +
   labs(
     title = "Horizontal View: SBCF → SBKP",
-    subtitle = sprintf("%s → %s", apt_sbcf_sbkp$name_adep, apt_sbcf_sbkp$name_ades),
+    subtitle = sprintf(
+      "%s → %s  |  Dashed circles = 40 NM exclusion zone  |  Dotted line = reference (GC N→X)",
+      apt_sbcf_sbkp$name_adep, apt_sbcf_sbkp$name_ades
+    ),
     x = "Longitude", y = "Latitude",
     color = "Flight ID"
   ) +
