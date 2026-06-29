@@ -439,14 +439,15 @@ extract_all_milestones <- function(.df) {
       milestone_list[[length(milestone_list) + 1]] <- ms_from
     }
 
-    # TO ADES: Last crossing into the target circle — last point where
-    # gc_to_ades >= target AND the next point is already inside (< target).
-    # This handles indirect routes / holdings where gc_to_ades oscillates.
+    # TO ADES: Last entry into the target circle — last point where
+    # gc_to_ades < target AND the previous point was outside (>= target).
+    # Using the first inside point is more accurate than last outside point
+    # when there is a radar coverage gap at the boundary crossing.
     ms_to <- .df |>
       arrange(timestamp) |>
-      mutate(next_gc_to_ades = lead(gc_to_ades)) |>
-      filter(gc_to_ades >= target_nm,
-             is.na(next_gc_to_ades) | next_gc_to_ades < target_nm) |>
+      mutate(prev_gc_to_ades = lag(gc_to_ades)) |>
+      filter(gc_to_ades < target_nm,
+             is.na(prev_gc_to_ades) | prev_gc_to_ades >= target_nm) |>
       slice_tail(n = 1) |>
       mutate(mst = paste0(target_nm, "NM_ADES"))
 
