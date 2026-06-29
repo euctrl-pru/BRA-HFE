@@ -543,11 +543,8 @@ hfe_40nm <- df_milestones |>
   mutate(
     # Flown distance along trajectory between milestones (NM)
     flown_dist_nm = dist_end - dist_start,
-    # Achieved distance: EUROCONTROL formula (methodology doc)
-    # H = (GC(N→D) - GC(X→D) + GC(O→X) - GC(O→N)) / 2
-    # N = 40NM_ADEP, X = 40NM_ADES, O = ADEP airport, D = ADES airport
-    achieved_dist_nm = (gc_to_ades_start - gc_to_ades_end + gc_from_adep_end - gc_from_adep_start) / 2,
-    # HFE: achieved / flown
+    # Achieved distance: great-circle between the two milestone points (N→X)
+    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
     hfe_40nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "40NM"
   ) |>
@@ -580,7 +577,7 @@ hfe_100nm <- df_milestones |>
   ) |>
   mutate(
     flown_dist_nm = dist_end - dist_start,
-    achieved_dist_nm = (gc_to_ades_start - gc_to_ades_end + gc_from_adep_end - gc_from_adep_start) / 2,
+    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
     hfe_100nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "100NM"
   ) |>
@@ -614,7 +611,7 @@ hfe_v2 <- df_milestones |>
   ) |>
   mutate(
     flown_dist_nm = dist_end - dist_start,
-    achieved_dist_nm = (gc_to_ades_start - gc_to_ades_end + gc_from_adep_end - gc_from_adep_start) / 2,
+    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
     hfe_v2 = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "V2 (40+100NM)"
   ) |>
