@@ -655,7 +655,9 @@ bind_rows(
   )
 ```
 
-## Plotting helpers
+## Example Visualizations
+
+Visualize sample trajectories for two aerodrome pairs: SBCF-SBKP and SBBR-SBSV.
 
 ```{r}
 #| label: plotting-helpers
@@ -755,10 +757,6 @@ plot_investigation_horizontal <- function(flt_ids, radius_nm = 40,
     theme(legend.position = "bottom")
 }
 ```
-
-## Example Visualizations
-
-Visualize sample trajectories for two aerodrome pairs: SBCF-SBKP and SBBR-SBSV.
 
 ```{r}
 #| label: select-example-pairs
@@ -1118,134 +1116,4 @@ flight_comparison |>
     digits = 2,
     caption = "HFE comparison by aerodrome pair (valid flights only) — positive diff = our HFE higher than BRA"
   )
-```
-
-## Investigation: SBSV ↔ SBGR
-
-SBSV→SBGR shows a systematic −7.19% difference (our HFE 91.64% vs BRA 98.83%). This section investigates the cause.
-
-```{r}
-#| label: investigate-sbsv-sbgr
-#| fig-width: 10
-#| fig-height: 8
-
-# Step 1: Flight-level detail for SBSV→SBGR
-flight_comparison |>
-  filter(valid == TRUE, ADEP == "SBSV", ADES == "SBGR") |>
-  mutate(
-    bra_hfe_v1_pct  = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
-    hfe_diff        = our_hfe_40nm - bra_hfe_v1_pct
-  ) |>
-  select(
-    FLTID,
-    `Takeoff`          = our_time,
-    `Our Flown (NM)`   = our_flown_dist_nm,
-    `BRA Flown (NM)`   = bra_dist_flown_v1_nm,
-    `Our Achieved (NM)`= our_achieved_dist_nm,
-    `BRA Achieved (NM)`= bra_achieved_v1_nm,
-    `Our HFE v1 (%)`   = our_hfe_40nm,
-    `BRA HFE v1 (%)`   = bra_hfe_v1_pct,
-    `Diff (%)`         = hfe_diff
-  ) |>
-  arrange(`Diff (%)`) |>
-  knitr::kable(digits = 2, caption = "SBSV→SBGR: flight-by-flight comparison")
-```
-
-```{r}
-#| label: investigate-sbsv-sbgr-milestones
-
-# Step 2: Check milestone positions for SBSV→SBGR flights
-sbsv_sbgr_fltids <- flight_comparison |>
-  filter(valid == TRUE, ADEP == "SBSV", ADES == "SBGR") |>
-  pull(FLTID)
-
-df_milestones |>
-  filter(FLTID %in% sbsv_sbgr_fltids) |>
-  filter(MST %in% c("FIRST_HIT", "40NM_ADEP", "40NM_ADES", "LAST_HIT")) |>
-  select(FLTID, MST, TIME,
-         `Flown (NM)` = DIST_FLOWN_NM,
-         `GC from ADEP (NM)` = GC_FROM_ADEP_NM,
-         `GC to ADES (NM)` = GC_TO_ADES_NM) |>
-  arrange(FLTID, TIME) |>
-  knitr::kable(digits = 2, caption = "SBSV→SBGR: milestone positions")
-```
-
-```{r}
-#| label: plot-sbsv-sbgr
-#| fig-width: 11
-#| fig-height: 9
-
-# Step 3: Trajectory map for SBSV→SBGR with reference lines and exclusion circles
-plot_investigation_horizontal(
-  sbsv_sbgr_fltids,
-  title_str    = "SBSV → SBGR trajectories",
-  subtitle_str = "Salvador → São Paulo (Guarulhos)  |  Dashed circles = 40 NM  |  Dotted = reference GC"
-)
-```
-
-```{r}
-#| label: investigate-sbsv-sbgr-gc
-
-# Step 4: How far does gc_to_ades actually go for these flights?
-# Check if 40NM_ADES milestone is far from ADES (route longer than expected)
-df_with_gc |>
-  filter(fid %in% sbsv_sbgr_fltids) |>
-  group_by(fid) |>
-  summarise(
-    total_flown_nm = max(cum_dist, na.rm = TRUE),
-    gc_adep_to_ades = first(gc_to_ades),      # GC at first point ≈ total GC distance
-    max_gc_from_adep = max(gc_from_adep, na.rm = TRUE),
-    min_gc_to_ades = min(gc_to_ades, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  mutate(
-    extra_flown_nm = total_flown_nm - gc_adep_to_ades,
-    hfe_approx = (gc_adep_to_ades / total_flown_nm) * 100
-  ) |>
-  knitr::kable(digits = 2, caption = "SBSV→SBGR: raw trajectory stats (gate-to-gate)")
-```
-
-## Investigation: SBCF → SBSP
-
-SBCF→SBSP shows a systematic +6.53% difference (our HFE 87.83% vs BRA 81.30%) across 19 flights.
-
-```{r}
-#| label: investigate-sbcf-sbsp
-
-# Step 1: Flight-level detail for SBCF→SBSP
-flight_comparison |>
-  filter(valid == TRUE, ADEP == "SBCF", ADES == "SBSP") |>
-  mutate(
-    bra_hfe_v1_pct = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
-    hfe_diff       = our_hfe_40nm - bra_hfe_v1_pct
-  ) |>
-  select(
-    FLTID,
-    `Takeoff`           = our_time,
-    `Our Flown (NM)`    = our_flown_dist_nm,
-    `BRA Flown (NM)`    = bra_dist_flown_v1_nm,
-    `Our Achieved (NM)` = our_achieved_dist_nm,
-    `BRA Achieved (NM)` = bra_achieved_v1_nm,
-    `Our HFE v1 (%)`    = our_hfe_40nm,
-    `BRA HFE v1 (%)`    = bra_hfe_v1_pct,
-    `Diff (%)`          = hfe_diff
-  ) |>
-  arrange(`Diff (%)`) |>
-  knitr::kable(digits = 2, caption = "SBCF→SBSP: flight-by-flight comparison")
-```
-
-```{r}
-#| label: plot-sbcf-sbsp
-#| fig-width: 11
-#| fig-height: 9
-
-sbcf_sbsp_fltids <- flight_comparison |>
-  filter(valid == TRUE, ADEP == "SBCF", ADES == "SBSP") |>
-  pull(FLTID)
-
-plot_investigation_horizontal(
-  sbcf_sbsp_fltids,
-  title_str    = "SBCF → SBSP trajectories",
-  subtitle_str = "Confins → São Paulo (Congonhas)  |  Dashed circles = 40 NM  |  Dotted = reference GC"
-)
 ```
