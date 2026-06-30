@@ -1193,3 +1193,48 @@ df_with_gc |>
   ) |>
   knitr::kable(digits = 2, caption = "SBSV→SBGR: raw trajectory stats (gate-to-gate)")
 ```
+
+## Investigation: SBCF → SBSP
+
+SBCF→SBSP shows a systematic +6.53% difference (our HFE 87.83% vs BRA 81.30%) across 19 flights.
+
+```{r}
+#| label: investigate-sbcf-sbsp
+
+# Step 1: Flight-level detail for SBCF→SBSP
+flight_comparison |>
+  filter(valid == TRUE, ADEP == "SBCF", ADES == "SBSP") |>
+  mutate(
+    bra_hfe_v1_pct = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
+    hfe_diff       = our_hfe_40nm - bra_hfe_v1_pct
+  ) |>
+  select(
+    FLTID,
+    `Takeoff`           = our_time,
+    `Our Flown (NM)`    = our_flown_dist_nm,
+    `BRA Flown (NM)`    = bra_dist_flown_v1_nm,
+    `Our Achieved (NM)` = our_achieved_dist_nm,
+    `BRA Achieved (NM)` = bra_achieved_v1_nm,
+    `Our HFE v1 (%)`    = our_hfe_40nm,
+    `BRA HFE v1 (%)`    = bra_hfe_v1_pct,
+    `Diff (%)`          = hfe_diff
+  ) |>
+  arrange(`Diff (%)`) |>
+  knitr::kable(digits = 2, caption = "SBCF→SBSP: flight-by-flight comparison")
+```
+
+```{r}
+#| label: plot-sbcf-sbsp
+#| fig-width: 11
+#| fig-height: 9
+
+sbcf_sbsp_fltids <- flight_comparison |>
+  filter(valid == TRUE, ADEP == "SBCF", ADES == "SBSP") |>
+  pull(FLTID)
+
+plot_investigation_horizontal(
+  sbcf_sbsp_fltids,
+  title_str    = "SBCF → SBSP trajectories",
+  subtitle_str = "Confins → São Paulo (Congonhas)  |  Dashed circles = 40 NM  |  Dotted = reference GC"
+)
+```
