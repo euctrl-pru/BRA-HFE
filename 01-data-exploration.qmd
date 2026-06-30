@@ -549,8 +549,11 @@ hfe_40nm <- df_milestones |>
   mutate(
     # Flown distance along trajectory between milestones (NM)
     flown_dist_nm = dist_end - dist_start,
-    # Achieved distance: great-circle between the two milestone points (N→X)
-    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
+    # Alternative formula (simpler but less accurate for deviated flights):
+    # achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon)
+    # EUROCONTROL methodology: H = (GC(N->D) - GC(X->D) + GC(O->X) - GC(O->N)) / 2
+    # N = entry milestone (ADEP side), X = exit milestone (ADES side), O = ADEP, D = ADES
+    achieved_dist_nm = (gc_to_ades_start - gc_to_ades_end + gc_from_adep_end - gc_from_adep_start) / 2,
     hfe_40nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "40NM"
   ) |>
@@ -583,7 +586,11 @@ hfe_100nm <- df_milestones |>
   ) |>
   mutate(
     flown_dist_nm = dist_end - dist_start,
-    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
+    # Alternative formula (simpler but less accurate for deviated flights):
+    # achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon)
+    # EUROCONTROL methodology: H = (GC(N->D) - GC(X->D) + GC(O->X) - GC(O->N)) / 2
+    # N = entry milestone (ADEP side), X = exit milestone (ADES side), O = ADEP, D = ADES
+    achieved_dist_nm = (gc_to_ades_start - gc_to_ades_end + gc_from_adep_end - gc_from_adep_start) / 2,
     hfe_100nm = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "100NM"
   ) |>
@@ -617,7 +624,11 @@ hfe_v2 <- df_milestones |>
   ) |>
   mutate(
     flown_dist_nm = dist_end - dist_start,
-    achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon),
+    # Alternative formula (simpler but less accurate for deviated flights):
+    # achieved_dist_nm = great_circle_distance(start_lat, start_lon, end_lat, end_lon)
+    # EUROCONTROL methodology: H = (GC(N->D) - GC(X->D) + GC(O->X) - GC(O->N)) / 2
+    # N = entry milestone (ADEP side), X = exit milestone (ADES side), O = ADEP, D = ADES
+    achieved_dist_nm = (gc_to_ades_start - gc_to_ades_end + gc_from_adep_end - gc_from_adep_start) / 2,
     hfe_v2 = (achieved_dist_nm / flown_dist_nm) * 100,
     milestone_pair = "V2 (40+100NM)"
   ) |>
