@@ -993,22 +993,16 @@ flight_comparison <- hfe_40nm |>
   ) |>
   left_join(
     bra_hfe_sample |>
-      mutate(
-        bra_time = lubridate::as_datetime(time),
-        bra_hfe_v1 = kpi05_v1,
-        bra_hfe_v2 = kpi05_v2,
-        bra_dist_flown_v1_nm = dist_flown_v1,
-        bra_dist_flown_v2_nm = dist_flown_v2
-      ) |>
+      mutate(bra_time = lubridate::as_datetime(time)) |>
       select(
         adep = plan_dep,
         ades = plan_arr,
         bra_time,
-        bra_callsign = id_icao,
-        bra_hfe_v1,
-        bra_hfe_v2,
+        bra_callsign        = id_icao,
         bra_dist_flown_v1_nm = dist_flown_v1,
-        bra_dist_flown_v2_nm = dist_flown_v2
+        bra_dist_flown_v2_nm = dist_flown_v2,
+        bra_achieved_v1_nm  = dist_achieved_v1,
+        bra_achieved_v2_nm  = dist_achieved_v2
       ),
     by = c("adep", "ades"),
     relationship = "many-to-many"
@@ -1026,9 +1020,9 @@ flight_comparison <- hfe_40nm |>
 
 flight_comparison |>
   mutate(
-    # kpi05_v1/v2 is additional NM flown — convert to HFE percentage
-    bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
-    bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100
+    # BRA HFE = dist_achieved / dist_flown (using direct BRA columns)
+    bra_hfe_v1_pct = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
+    bra_hfe_v2_pct = (bra_achieved_v2_nm / bra_dist_flown_v2_nm) * 100
   ) |>
   select(
     FLTID, ADEP, ADES,
@@ -1060,8 +1054,8 @@ flight_comparison |>
 if (nrow(flight_comparison) > 0) {
   flight_comparison |>
     mutate(
-      bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
-      bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100
+      bra_hfe_v1_pct = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
+      bra_hfe_v2_pct = (bra_achieved_v2_nm / bra_dist_flown_v2_nm) * 100
     ) |>
     group_by(valid) |>
     summarise(
@@ -1088,8 +1082,8 @@ if (nrow(flight_comparison) > 0) {
 flight_comparison |>
   filter(valid == TRUE) |>
   mutate(
-    bra_hfe_v1_pct = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
-    bra_hfe_v2_pct = (1 - bra_hfe_v2 / bra_dist_flown_v2_nm) * 100,
+    bra_hfe_v1_pct = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
+    bra_hfe_v2_pct = (bra_achieved_v2_nm / bra_dist_flown_v2_nm) * 100,
     hfe_diff_v1 = our_hfe_40nm - bra_hfe_v1_pct,
     hfe_diff_v2 = our_hfe_v2 - bra_hfe_v2_pct,
     dist_diff_v1 = our_flown_dist_nm - bra_dist_flown_v1_nm,
@@ -1128,9 +1122,7 @@ SBSV→SBGR shows a systematic −7.19% difference (our HFE 91.64% vs BRA 98.83%
 flight_comparison |>
   filter(valid == TRUE, ADEP == "SBSV", ADES == "SBGR") |>
   mutate(
-    bra_hfe_v1_pct  = (1 - bra_hfe_v1 / bra_dist_flown_v1_nm) * 100,
-    # BRA achieved GC = flown * (hfe/100)
-    bra_achieved_nm = bra_dist_flown_v1_nm * (bra_hfe_v1_pct / 100),
+    bra_hfe_v1_pct  = (bra_achieved_v1_nm / bra_dist_flown_v1_nm) * 100,
     hfe_diff        = our_hfe_40nm - bra_hfe_v1_pct
   ) |>
   select(
@@ -1139,7 +1131,7 @@ flight_comparison |>
     `Our Flown (NM)`   = our_flown_dist_nm,
     `BRA Flown (NM)`   = bra_dist_flown_v1_nm,
     `Our Achieved (NM)`= our_achieved_dist_nm,
-    `BRA Achieved (NM)`= bra_achieved_nm,
+    `BRA Achieved (NM)`= bra_achieved_v1_nm,
     `Our HFE v1 (%)`   = our_hfe_40nm,
     `BRA HFE v1 (%)`   = bra_hfe_v1_pct,
     `Diff (%)`         = hfe_diff
