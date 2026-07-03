@@ -6,6 +6,8 @@ format:
   html:
     code-fold: true
     toc: true
+execute:
+  warning: false
 ---
 
 ## Data Overview

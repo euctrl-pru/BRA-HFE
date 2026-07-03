@@ -1,0 +1,1167 @@
+---
+title: "Flight Matching Diagnostic & Improved Matching"
+author: "PRU Analysis"
+date: today
+format:
+  html:
+    code-fold: true
+    toc: true
+execute:
+  warning: false
+---
+
+## Overview
+
+This document investigates why the initial flight matching failed and implements improved matching strategies.
+
+**Matching Challenge**: Link flights from our radar extract to Brazil's HFE reference dataset.
+
+## Setup
+
+```{r}
+#| label: setup
+#| message: false
+
+library(conflicted)
+library(tidyverse)
+library(arrow)
+library(lubridate)
+
+conflict_prefer("filter", "dplyr")
+conflicts_prefer(dplyr::lag)
+
+# Load local helper functions
+source("R/sf_helpers.R")
+
+# Path to radar_brazil utilities
+radar_utils_path <- "../radar_brazil"
+```
+
+## Load Data
+
+```{r}
+#| label: load-data
+
+# Our extracted trajectories
+df_trajectories <- read_parquet("data/sample_trajectories_2025_12_10.parquet")
+
+# Brazil HFE reference data
+bra_hfe_sample <- read_delim(
+  "data/brazil_hfe_2025_12_10.csv",
+  delim = ",",
+  trim_ws = TRUE,
+  show_col_types = FALSE
+)
+
+# Get our flight summary
+our_flights <- df_trajectories |>
+  group_by(fid) |>
+  summarise(
+    adep = first(adep),
+    ades = first(ades),
+    callsign = first(callsign),
+    first_time = min(timestamp),
+    last_time = max(timestamp),
+    n_positions = n(),
+    .groups = "drop"
+  ) |>
+  arrange(adep, ades, first_time)
+
+# Clean Brazil HFE data
+bra_flights <- bra_hfe_sample |>
+  mutate(
+    bra_time = as_datetime(time),
+    bra_date = as_date(bra_time),
+    bra_callsign = id_icao
+  ) |>
+  rename(
+    adep = plan_dep,
+    ades = plan_arr
+  ) |>
+  select(
+    adep, ades, bra_callsign, bra_time, bra_date,
+    bra_hfe_v1 = kpi05_v1,
+    bra_hfe_v2 = kpi05_v2,
+    bra_dist_flown_v1 = dist_flown_v1,
+    bra_dist_flown_v2 = dist_flown_v2,
+    bra_dist_achieved_v1 = dist_achieved_v1,
+    bra_dist_achieved_v2 = dist_achieved_v2,
+    bra_equip = equip
+  ) |>
+  arrange(adep, ades, bra_time)
+```
+
+## Diagnostic 1: Data Coverage Comparison
+
+Compare flight counts per route:
+
+```{r}
+#| label: coverage-comparison
+
+coverage_comparison <- our_flights |>
+  count(adep, ades, name = "our_count") |>
+  full_join(
+    bra_flights |> count(adep, ades, name = "bra_count"),
+    by = c("adep", "ades")
+  ) |>
+  replace_na(list(our_count = 0, bra_count = 0)) |>
+  mutate(
+    difference = bra_count - our_count,
+    pct_coverage = round(100 * our_count / bra_count, 1)
+  ) |>
+  arrange(adep, ades)
+
+coverage_comparison |>
+  knitr::kable(
+    caption = "Flight count comparison by route",
+    col.names = c("ADEP", "ADES", "Our Extract", "Brazil HFE", "Difference", "% Coverage")
+  )
+```
+
+**Key Observations**:
+
+```{r}
+#| label: coverage-stats
+
+list(
+  total_our = sum(coverage_comparison$our_count),
+  total_brazil = sum(coverage_comparison$bra_count),
+  overall_coverage_pct = round(100 * sum(coverage_comparison$our_count) / sum(coverage_comparison$bra_count), 1),
+  routes_with_perfect_match = sum(coverage_comparison$difference == 0),
+  routes_missing_flights = sum(coverage_comparison$difference > 0)
+)
+```
+
+## Diagnostic 2: Time Field Analysis
+
+Investigate time differences between datasets:
+
+```{r}
+#| label: time-analysis
+
+# For routes with flights in both datasets, examine time distributions
+time_comparison <- our_flights |>
+  select(adep, ades, our_time = first_time) |>
+  inner_join(
+    bra_flights |> select(adep, ades, bra_time),
+    by = c("adep", "ades"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    time_diff_min = as.numeric(difftime(our_time, bra_time, units = "mins")),
+    abs_time_diff_min = abs(time_diff_min)
+  )
+
+# Summary statistics
+time_comparison |>
+  summarise(
+    n_comparisons = n(),
+    mean_abs_diff = mean(abs_time_diff_min),
+    median_abs_diff = median(abs_time_diff_min),
+    min_abs_diff = min(abs_time_diff_min),
+    max_abs_diff = max(abs_time_diff_min),
+    within_5min = sum(abs_time_diff_min <= 5),
+    within_15min = sum(abs_time_diff_min <= 15),
+    within_30min = sum(abs_time_diff_min <= 30),
+    within_60min = sum(abs_time_diff_min <= 60)
+  ) |>
+  knitr::kable(
+    digits = 1,
+    caption = "Time difference statistics (all pairwise comparisons)"
+  )
+```
+
+### Time Difference Distribution
+
+```{r}
+#| label: plot-time-diff
+#| fig-width: 10
+#| fig-height: 6
+
+ggplot(time_comparison, aes(x = abs_time_diff_min)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = c(5, 15, 30, 60),
+             linetype = "dashed", color = "red", linewidth = 0.8) +
+  scale_x_continuous(breaks = c(0, 5, 15, 30, 60, 120, 180, 240, 300)) +
+  labs(
+    title = "Distribution of Time Differences (Absolute)",
+    subtitle = "All pairwise comparisons between our extract and Brazil HFE",
+    x = "Absolute Time Difference (minutes)",
+    y = "Count",
+    caption = "Red lines: 5, 15, 30, 60 minute thresholds"
+  ) +
+  theme_minimal()
+```
+
+## Diagnostic 3: Callsign Matching
+
+Check if callsigns match between datasets:
+
+```{r}
+#| label: callsign-analysis
+
+# Join on route and check callsign overlap
+callsign_comparison <- our_flights |>
+  select(fid, adep, ades, our_callsign = callsign, our_time = first_time) |>
+  inner_join(
+    bra_flights |> select(adep, ades, bra_callsign, bra_time),
+    by = c("adep", "ades"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    callsign_match = our_callsign == bra_callsign,
+    time_diff_min = abs(as.numeric(difftime(our_time, bra_time, units = "mins")))
+  )
+
+# How many have matching callsigns?
+callsign_comparison |>
+  summarise(
+    total_comparisons = n(),
+    callsign_matches = sum(callsign_match, na.rm = TRUE),
+    pct_callsign_match = round(100 * callsign_matches / total_comparisons, 1),
+    matches_within_15min = sum(callsign_match & time_diff_min <= 15, na.rm = TRUE),
+    matches_within_60min = sum(callsign_match & time_diff_min <= 60, na.rm = TRUE)
+  ) |>
+  knitr::kable(
+    caption = "Callsign matching analysis"
+  )
+```
+
+### Sample Callsigns
+
+```{r}
+#| label: sample-callsigns
+
+# Show sample of callsigns from each dataset
+list(
+  our_callsigns_sample = head(sort(unique(our_flights$callsign)), 15),
+  bra_callsigns_sample = head(sort(unique(bra_flights$bra_callsign)), 15)
+)
+```
+
+## Strategy 1: Nearest Neighbor Matching (Time-Based)
+
+Match each of our flights to the nearest Brazil HFE flight by time (within threshold).
+
+**Strategy**: For each route pair, find the Brazil flight closest in time to our flight.
+
+### Example: When Time Matching Works
+
+```{r}
+#| label: time-matching-success-example
+
+# Find a good time-match example (same route, close time, different callsigns)
+time_match_example <- our_flights |>
+  inner_join(
+    bra_flights,
+    by = c("adep", "ades"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins"))),
+    callsign_match = callsign == bra_callsign
+  ) |>
+  filter(!callsign_match, time_diff_min < 2) |>
+  arrange(time_diff_min) |>
+  head(1)
+
+if (nrow(time_match_example) > 0) {
+  time_match_example |>
+    select(
+      fid, adep, ades,
+      our_callsign = callsign,
+      bra_callsign,
+      our_time = first_time,
+      bra_time,
+      time_diff_min
+    ) |>
+    knitr::kable(
+      digits = 2,
+      caption = "✅ SUCCESS: Time matching works when callsigns differ but timing is tight"
+    )
+} else {
+  cat("Most flights match by callsign, so time-only matches are rare.\n")
+}
+```
+
+### Counter-Example: When Time Matching Fails
+
+```{r}
+#| label: time-matching-failure-example
+
+# Find cases where multiple flights on same route within short time window
+time_ambiguity <- our_flights |>
+  inner_join(
+    bra_flights,
+    by = c("adep", "ades"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins")))
+  ) |>
+  group_by(fid) |>
+  filter(n() > 1, time_diff_min <= 30) |>
+  slice_min(time_diff_min, n = 3) |>
+  ungroup() |>
+  arrange(fid, time_diff_min) |>
+  head(6)
+
+if (nrow(time_ambiguity) > 0) {
+  time_ambiguity |>
+    select(
+      fid, adep, ades,
+      our_callsign = callsign,
+      bra_callsign,
+      time_diff_min
+    ) |>
+    knitr::kable(
+      digits = 2,
+      caption = "❌ FAILURE: Time matching alone creates ambiguity - which Brazil flight is correct?"
+    )
+} else {
+  cat("Time matching has clear winners in this dataset.\n")
+}
+```
+
+**Problem with time-only matching**: On busy routes (e.g., SBCF → SBSP with 30 flights/day), multiple flights depart within minutes. Time proximity alone cannot distinguish the correct match.
+
+**Solution**: Need additional discriminator → **Callsign matching** (Strategy 2)
+
+### Implementation
+
+```{r}
+#| label: nn-time-matching
+
+match_nearest_by_time <- function(our_df, bra_df, max_time_diff_min = 30) {
+
+  matched <- our_df |>
+    left_join(
+      bra_df,
+      by = c("adep", "ades"),
+      relationship = "many-to-many"
+    ) |>
+    mutate(
+      time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins")))
+    ) |>
+    # For each of our flights, find closest Brazil flight
+    group_by(fid) |>
+    slice_min(time_diff_min, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    # Only keep if within threshold
+    filter(time_diff_min <= max_time_diff_min)
+
+  return(matched)
+}
+
+# Try with different time thresholds
+thresholds <- c(5, 15, 30, 60)
+
+threshold_results <- map_dfr(thresholds, function(thresh) {
+  matched <- match_nearest_by_time(our_flights, bra_flights, max_time_diff_min = thresh)
+
+  tibble(
+    threshold_min = thresh,
+    n_matched = nrow(matched),
+    pct_matched = round(100 * nrow(matched) / nrow(our_flights), 1),
+    mean_time_diff = round(mean(matched$time_diff_min), 1),
+    median_time_diff = round(median(matched$time_diff_min), 1)
+  )
+})
+
+threshold_results |>
+  knitr::kable(
+    caption = "Nearest neighbor time matching results",
+    col.names = c("Threshold (min)", "Matched", "% Matched", "Mean Δt", "Median Δt")
+  )
+```
+
+### Apply Best Time Matching (15 min threshold)
+
+```{r}
+#| label: apply-time-matching
+
+matched_time <- match_nearest_by_time(our_flights, bra_flights, max_time_diff_min = 15)
+
+cat(sprintf("Matched %d out of %d flights (%.1f%%) using 15-minute time threshold\n",
+            nrow(matched_time), nrow(our_flights),
+            100 * nrow(matched_time) / nrow(our_flights)))
+```
+
+## Strategy 2: Callsign + Route Matching
+
+Match by callsign and route (ignore time initially).
+
+**Strategy**: Exact match on ADEP + ADES + Callsign, then pick closest by time if multiple candidates.
+
+### Example: When Callsign Matching Works
+
+```{r}
+#| label: callsign-matching-success-example
+
+# Find perfect callsign matches
+callsign_perfect <- our_flights |>
+  inner_join(
+    bra_flights,
+    by = c("adep", "ades", "callsign" = "bra_callsign")
+  ) |>
+  mutate(
+    time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins")))
+  ) |>
+  group_by(fid) |>
+  slice_min(time_diff_min, n = 1) |>
+  ungroup() |>
+  arrange(time_diff_min) |>
+  head(3)
+
+callsign_perfect |>
+  select(
+    fid, adep, ades,
+    callsign,
+    our_time = first_time,
+    bra_time,
+    time_diff_min,
+    n_positions
+  ) |>
+  knitr::kable(
+    digits = 2,
+    caption = "✅ SUCCESS: Callsign matching gives unambiguous identification"
+  )
+```
+
+**Why this works**: Callsigns are unique per flight on a given route at a given time. Even if time differs slightly, the callsign resolves ambiguity.
+
+### Counter-Example: When Callsign Matching Fails
+
+```{r}
+#| label: callsign-matching-failure-example
+
+# Find flights in our data that have NO callsign match in Brazil data
+our_callsigns <- unique(our_flights$callsign)
+bra_callsigns <- unique(bra_flights$bra_callsign)
+
+callsign_orphans <- our_flights |>
+  filter(!callsign %in% bra_callsigns) |>
+  arrange(adep, ades, first_time) |>
+  head(5)
+
+if (nrow(callsign_orphans) > 0) {
+  callsign_orphans |>
+    select(
+      fid, adep, ades, callsign, first_time, n_positions
+    ) |>
+    knitr::kable(
+      caption = "❌ FAILURE: These callsigns don't appear in Brazil dataset at all"
+    )
+
+  cat(sprintf("\n%d flights have callsigns not found in Brazil data.\n",
+              sum(!our_flights$callsign %in% bra_callsigns)))
+} else {
+  cat("All our callsigns have matches in Brazil data.\n")
+}
+```
+
+**Problem**: Some flights use callsigns that don't exist in Brazil's dataset. Possible reasons:
+- Brazil uses different callsign format (e.g., flight number vs radio callsign)
+- Flights filtered out by Brazil's quality criteria before callsign recorded
+- Radar/ATC system differences in callsign capture
+
+**Solution**: For unmatched callsigns, fall back to time-based matching → **Hybrid approach** (Strategy 3)
+
+### Implementation
+
+```{r}
+#| label: callsign-matching
+
+matched_callsign <- our_flights |>
+  inner_join(
+    bra_flights,
+    by = c("adep", "ades", "callsign" = "bra_callsign")
+  ) |>
+  mutate(
+    time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins")))
+  ) |>
+  # If multiple matches, take closest by time
+  group_by(fid) |>
+  slice_min(time_diff_min, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+cat(sprintf("Matched %d out of %d flights (%.1f%%) using callsign + route\n",
+            nrow(matched_callsign), nrow(our_flights),
+            100 * nrow(matched_callsign) / nrow(our_flights)))
+
+# Time difference for callsign matches
+matched_callsign |>
+  summarise(
+    n = n(),
+    mean_time_diff = mean(time_diff_min),
+    median_time_diff = median(time_diff_min),
+    max_time_diff = max(time_diff_min)
+  ) |>
+  knitr::kable(
+    digits = 1,
+    caption = "Time differences for callsign matches"
+  )
+```
+
+## Strategy 3: Hybrid Matching
+
+**Strategy**: Combine the strengths of both approaches:
+1. **First pass**: Match by callsign (high confidence, unambiguous)
+2. **Second pass**: For remaining flights, match by time proximity (15 min window)
+
+This gives us:
+- **Precision** from callsign matching (eliminates false positives)
+- **Coverage** from time matching (catches callsign mismatches)
+
+### Why Hybrid is Needed: Concrete Example
+
+```{r}
+#| label: hybrid-motivation-example
+
+# Show a flight that WOULD match by time but WRONG callsign
+# Then show it correctly matched by hybrid approach
+
+# Example: Flight that needs time-based fallback
+needs_time_fallback <- our_flights |>
+  filter(!callsign %in% bra_callsigns) |>
+  inner_join(
+    bra_flights,
+    by = c("adep", "ades"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins")))
+  ) |>
+  group_by(fid) |>
+  slice_min(time_diff_min, n = 1) |>
+  ungroup() |>
+  filter(time_diff_min <= 15) |>
+  head(2)
+
+if (nrow(needs_time_fallback) > 0) {
+  needs_time_fallback |>
+    select(
+      fid, adep, ades,
+      our_callsign = callsign,
+      bra_callsign,
+      time_diff_min
+    ) |>
+    knitr::kable(
+      digits = 2,
+      caption = "Hybrid Success: These flights need time-based fallback (callsign mismatch)"
+    )
+} else {
+  cat("Most flights in this sample match by callsign.\n")
+}
+```
+
+**Interpretation**: Without the hybrid approach, we'd lose these flights. They're genuine matches (same route, same time) but with different callsign identifiers.
+
+### Implementation
+
+```{r}
+#| label: hybrid-matching
+
+# Step 1: Callsign matches
+matched_by_callsign <- our_flights |>
+  inner_join(
+    bra_flights,
+    by = c("adep", "ades", "callsign" = "bra_callsign")
+  ) |>
+  mutate(
+    time_diff_min = abs(as.numeric(difftime(first_time, bra_time, units = "mins"))),
+    match_method = "callsign"
+  ) |>
+  group_by(fid) |>
+  slice_min(time_diff_min, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+# Step 2: For unmatched flights, try time-based matching
+unmatched_fids <- setdiff(our_flights$fid, matched_by_callsign$fid)
+
+our_unmatched <- our_flights |> filter(fid %in% unmatched_fids)
+
+matched_by_time <- match_nearest_by_time(our_unmatched, bra_flights, max_time_diff_min = 15) |>
+  mutate(match_method = "time")
+
+# Combine
+matched_hybrid <- bind_rows(
+  matched_by_callsign,
+  matched_by_time
+)
+
+# Summary
+matched_hybrid |>
+  count(match_method) |>
+  mutate(pct = round(100 * n / nrow(our_flights), 1)) |>
+  knitr::kable(
+    caption = "Hybrid matching results",
+    col.names = c("Method", "Count", "% of Total")
+  )
+
+cat(sprintf("\nTotal matched: %d out of %d flights (%.1f%%)\n",
+            nrow(matched_hybrid), nrow(our_flights),
+            100 * nrow(matched_hybrid) / nrow(our_flights)))
+```
+
+## Matched Flights Summary
+
+```{r}
+#| label: matched-summary
+
+matched_hybrid |>
+  group_by(adep, ades) |>
+  summarise(
+    n_matched = n(),
+    callsign_matches = sum(match_method == "callsign"),
+    time_matches = sum(match_method == "time"),
+    mean_time_diff = round(mean(time_diff_min), 1),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n_matched)) |>
+  knitr::kable(
+    caption = "Matched flights by route",
+    col.names = c("ADEP", "ADES", "Matched", "By Callsign", "By Time", "Mean Δt (min)")
+  )
+```
+
+## Unmatched Flights Analysis
+
+Investigate why some flights didn't match:
+
+```{r}
+#| label: unmatched-analysis
+
+unmatched_our <- our_flights |>
+  filter(!fid %in% matched_hybrid$fid) |>
+  arrange(adep, ades, first_time)
+
+cat(sprintf("Unmatched flights: %d (%.1f%%)\n",
+            nrow(unmatched_our),
+            100 * nrow(unmatched_our) / nrow(our_flights)))
+
+if (nrow(unmatched_our) > 0) {
+  unmatched_our |>
+    count(adep, ades) |>
+    arrange(desc(n)) |>
+    knitr::kable(
+      caption = "Unmatched flights by route",
+      col.names = c("ADEP", "ADES", "Count")
+    )
+
+  # Show sample of unmatched flights
+  cat("\nSample of unmatched flights:\n")
+  unmatched_our |>
+    select(fid, adep, ades, callsign, first_time, last_time, n_positions) |>
+    head(10) |>
+    knitr::kable()
+}
+```
+
+## Export Matched Dataset
+
+```{r}
+#| label: export-matched
+
+# Create comprehensive matched dataset
+matched_export <- matched_hybrid |>
+  select(
+    fid,
+    adep, ades,
+    our_callsign = callsign,
+    bra_callsign,
+    our_first_time = first_time,
+    our_last_time = last_time,
+    bra_time,
+    time_diff_min,
+    match_method,
+    n_positions,
+    bra_hfe_v1,
+    bra_hfe_v2,
+    bra_dist_flown_v1,
+    bra_dist_flown_v2,
+    bra_dist_achieved_v1,
+    bra_dist_achieved_v2,
+    bra_equip
+  )
+
+write_csv(matched_export, "data/matched_flights.csv")
+
+cat(sprintf("Exported %d matched flights to data/matched_flights.csv\n", nrow(matched_export)))
+```
+
+## Validation Comparison Preview
+
+Quick preview of HFE comparison (detailed analysis in next document):
+
+```{r}
+#| label: hfe-preview
+#| eval: false
+
+# Load our HFE calculations (from milestone extraction)
+# This will be done in the next analysis document
+# For now, just show the structure
+
+matched_export |>
+  select(
+    fid, adep, ades,
+    match_method,
+    time_diff_min,
+    bra_hfe_v1,
+    bra_hfe_v2,
+    bra_dist_flown_v1,
+    bra_dist_flown_v2
+  ) |>
+  head(15) |>
+  knitr::kable(
+    digits = 2,
+    caption = "Preview: Matched flights ready for HFE comparison"
+  )
+```
+
+## Deep Dive: Unmatched Flights Investigation
+
+Let's investigate the 32 flights that didn't match to understand why:
+
+```{r}
+#| label: unmatched-deep-dive
+
+# Get Brazil flights that weren't matched
+matched_bra_ids <- matched_hybrid |>
+  select(adep, ades, bra_callsign, bra_time) |>
+  mutate(bra_id = paste(adep, ades, bra_callsign, bra_time, sep = "_"))
+
+bra_unmatched <- bra_flights |>
+  mutate(bra_id = paste(adep, ades, bra_callsign, bra_time, sep = "_")) |>
+  filter(!bra_id %in% matched_bra_ids$bra_id)
+
+cat(sprintf("Our unmatched flights: %d\n", nrow(unmatched_our)))
+cat(sprintf("Brazil unmatched flights: %d\n", nrow(bra_unmatched)))
+```
+
+### Unmatched Flight Characteristics
+
+```{r}
+#| label: unmatched-characteristics
+
+if (nrow(unmatched_our) > 0) {
+  # Our unmatched flights by route
+  unmatched_our_summary <- unmatched_our |>
+    group_by(adep, ades) |>
+    summarise(
+      n_flights = n(),
+      avg_positions = round(mean(n_positions)),
+      callsigns = paste(unique(callsign), collapse = ", "),
+      .groups = "drop"
+    ) |>
+    arrange(desc(n_flights))
+
+  unmatched_our_summary |>
+    knitr::kable(
+      caption = "Our unmatched flights by route",
+      col.names = c("ADEP", "ADES", "Count", "Avg Positions", "Callsigns")
+    )
+}
+```
+
+### Time Distribution: Matched vs Unmatched
+
+```{r}
+#| label: plot-matched-vs-unmatched-time
+#| fig-width: 12
+#| fig-height: 6
+
+# Compare time distribution of matched vs unmatched flights
+time_comparison_df <- bind_rows(
+  matched_hybrid |>
+    mutate(hour = hour(first_time), status = "Matched") |>
+    select(adep, ades, hour, status),
+  unmatched_our |>
+    mutate(hour = hour(first_time), status = "Unmatched") |>
+    select(adep, ades, hour, status)
+)
+
+ggplot(time_comparison_df, aes(x = hour, fill = status)) +
+  geom_histogram(bins = 24, position = "dodge", alpha = 0.7) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  scale_fill_manual(values = c("Matched" = "steelblue", "Unmatched" = "coral")) +
+  labs(
+    title = "Time Distribution: Matched vs Unmatched Flights",
+    subtitle = "Flight start time by hour of day",
+    x = "Hour of Day (UTC)",
+    y = "Number of Flights",
+    fill = "Status"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+### Callsign Patterns
+
+```{r}
+#| label: callsign-patterns
+
+if (nrow(unmatched_our) > 0) {
+  # Extract airline prefix from callsigns
+  unmatched_airlines <- unmatched_our |>
+    mutate(airline = str_extract(callsign, "^[A-Z]+")) |>
+    count(airline, sort = TRUE)
+
+  matched_airlines <- matched_hybrid |>
+    mutate(airline = str_extract(callsign, "^[A-Z]+")) |>
+    count(airline, sort = TRUE)
+
+  airline_comparison <- full_join(
+    matched_airlines, unmatched_airlines,
+    by = "airline",
+    suffix = c("_matched", "_unmatched")
+  ) |>
+    replace_na(list(n_matched = 0, n_unmatched = 0)) |>
+    mutate(
+      total = n_matched + n_unmatched,
+      pct_unmatched = round(100 * n_unmatched / total, 1)
+    ) |>
+    arrange(desc(total))
+
+  airline_comparison |>
+    head(10) |>
+    knitr::kable(
+      caption = "Airline matching success",
+      col.names = c("Airline", "Matched", "Unmatched", "Total", "% Unmatched")
+    )
+}
+```
+
+## Visualizations: Example Trajectories
+
+### Matched Flight Examples
+
+```{r}
+#| label: plot-matched-examples
+#| fig-width: 12
+#| fig-height: 8
+
+# Select 3 well-matched flights (callsign match, low time diff)
+example_matched <- matched_hybrid |>
+  filter(match_method == "callsign") |>
+  arrange(time_diff_min) |>
+  head(3) |>
+  pull(fid)
+
+# Get trajectories
+example_matched_traj <- df_trajectories |>
+  filter(fid %in% example_matched)
+
+# Plot
+ggplot(example_matched_traj) +
+  geom_path(aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
+            linewidth = 1, alpha = 0.8) +
+  geom_point(aes(x = longitude_adep, y = latitude_adep),
+             color = "green", size = 4, shape = 17) +
+  geom_point(aes(x = longitude_ades, y = latitude_ades),
+             color = "red", size = 4, shape = 17) +
+  facet_wrap(~ paste(adep, "→", ades, "\nFID:", fid), scales = "free") +
+  labs(
+    title = "Well-Matched Flight Examples",
+    subtitle = "Callsign matches with < 1 minute time difference",
+    x = "Longitude", y = "Latitude",
+    color = "Flight ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Unmatched Flight Examples
+
+```{r}
+#| label: plot-unmatched-examples
+#| fig-width: 12
+#| fig-height: 8
+
+if (nrow(unmatched_our) >= 3) {
+  # Select 3 unmatched flights from different routes
+  example_unmatched <- unmatched_our |>
+    group_by(adep, ades) |>
+    slice_head(n = 1) |>
+    ungroup() |>
+    head(3) |>
+    pull(fid)
+
+  # Get trajectories
+  example_unmatched_traj <- df_trajectories |>
+    filter(fid %in% example_unmatched)
+
+  # Plot
+  ggplot(example_unmatched_traj) +
+    geom_path(aes(x = longitude, y = latitude, group = fid, color = as.factor(fid)),
+              linewidth = 1, alpha = 0.8) +
+    geom_point(aes(x = longitude_adep, y = latitude_adep),
+               color = "green", size = 4, shape = 17) +
+    geom_point(aes(x = longitude_ades, y = latitude_ades),
+               color = "red", size = 4, shape = 17) +
+    facet_wrap(~ paste(adep, "→", ades, "\nFID:", fid, "\nCallsign:", callsign), scales = "free") +
+    labs(
+      title = "Unmatched Flight Examples",
+      subtitle = "Flights not found in Brazil HFE reference dataset",
+      x = "Longitude", y = "Latitude",
+      color = "Flight ID"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+} else {
+  cat("Insufficient unmatched flights for visualization")
+}
+```
+
+### Matching Quality by Route
+
+```{r}
+#| label: plot-matching-quality
+#| fig-width: 10
+#| fig-height: 8
+
+# Calculate matching rate and average time diff by route
+route_quality <- matched_hybrid |>
+  group_by(adep, ades) |>
+  summarise(
+    n_matched = n(),
+    avg_time_diff = mean(time_diff_min),
+    .groups = "drop"
+  ) |>
+  left_join(
+    our_flights |> count(adep, ades, name = "n_total"),
+    by = c("adep", "ades")
+  ) |>
+  mutate(
+    match_rate = n_matched / n_total,
+    route = paste(adep, "→", ades)
+  ) |>
+  arrange(desc(n_matched))
+
+ggplot(route_quality, aes(x = reorder(route, match_rate), y = match_rate)) +
+  geom_col(aes(fill = avg_time_diff), alpha = 0.8) +
+  geom_text(aes(label = sprintf("%d/%d", n_matched, n_total)),
+            hjust = -0.2, size = 3) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1.1)) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue",
+                      name = "Avg Time\nDiff (min)") +
+  coord_flip() +
+  labs(
+    title = "Matching Quality by Route",
+    subtitle = "Match rate and average time difference",
+    x = "Route",
+    y = "Match Rate",
+    caption = "Labels show: matched/total flights"
+  ) +
+  theme_minimal()
+```
+
+### Time Difference Distribution by Match Method
+
+```{r}
+#| label: plot-time-diff-by-method
+#| fig-width: 10
+#| fig-height: 6
+
+ggplot(matched_hybrid, aes(x = match_method, y = time_diff_min, fill = match_method)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  scale_fill_manual(values = c("callsign" = "steelblue", "time" = "coral")) +
+  labs(
+    title = "Time Difference Distribution by Matching Method",
+    subtitle = sprintf("Callsign matches: %.1f min median | Time matches: %.1f min median",
+                      median(matched_hybrid$time_diff_min[matched_hybrid$match_method == "callsign"]),
+                      median(matched_hybrid$time_diff_min[matched_hybrid$match_method == "time"])),
+    x = "Matching Method",
+    y = "Time Difference (minutes)",
+    fill = "Method"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## FIRST_HIT Timing Analysis
+
+Investigate systematic offset between our FIRST_HIT and Brazil's reference time:
+
+```{r}
+#| label: first-hit-timing-analysis
+
+# Calculate signed time difference (positive = our time is later)
+matched_timing <- matched_hybrid |>
+  mutate(
+    signed_time_diff_min = as.numeric(difftime(first_time, bra_time, units = "mins"))
+  )
+
+# Summary statistics
+timing_stats <- matched_timing |>
+  summarise(
+    n = n(),
+    mean_diff = round(mean(signed_time_diff_min), 2),
+    median_diff = round(median(signed_time_diff_min), 2),
+    sd_diff = round(sd(signed_time_diff_min), 2),
+    our_earlier = sum(signed_time_diff_min < 0),
+    bra_earlier = sum(signed_time_diff_min > 0),
+    exact_match = sum(abs(signed_time_diff_min) < 0.1)
+  )
+
+timing_stats |>
+  knitr::kable(
+    caption = "FIRST_HIT timing offset analysis",
+    col.names = c("N", "Mean Δ", "Median Δ", "SD", "Our Earlier", "BRA Earlier", "Exact Match")
+  )
+```
+
+**Interpretation**:
+
+- **Negative difference**: Our FIRST_HIT is **before** Brazil's reference time
+- **Positive difference**: Our FIRST_HIT is **after** Brazil's reference time
+
+```{r}
+#| label: plot-signed-time-diff
+#| fig-width: 10
+#| fig-height: 6
+
+ggplot(matched_timing, aes(x = signed_time_diff_min)) +
+  geom_histogram(bins = 40, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_vline(xintercept = median(matched_timing$signed_time_diff_min),
+             linetype = "solid", color = "darkblue", linewidth = 1) +
+  annotate("text", x = median(matched_timing$signed_time_diff_min),
+           y = Inf, vjust = 2,
+           label = sprintf("Median: %.2f min", median(matched_timing$signed_time_diff_min)),
+           color = "darkblue", fontface = "bold") +
+  labs(
+    title = "FIRST_HIT Timing Offset Distribution",
+    subtitle = "Signed difference: Our FIRST_HIT time - Brazil reference time",
+    x = "Time Difference (minutes)\n← Our Earlier | Brazil Earlier →",
+    y = "Number of Flights",
+    caption = "Red line = exact match (0 min) | Blue line = median offset"
+  ) +
+  theme_minimal()
+```
+
+### Timing Offset by Route
+
+```{r}
+#| label: plot-timing-by-route
+#| fig-width: 10
+#| fig-height: 10
+
+route_timing <- matched_timing |>
+  mutate(route = paste(adep, "→", ades)) |>
+  group_by(route) |>
+  mutate(n_route = n()) |>
+  ungroup() |>
+  filter(n_route >= 3) |>  # Only routes with 3+ flights
+  arrange(adep, ades)
+
+ggplot(route_timing, aes(x = reorder(route, signed_time_diff_min, FUN = median),
+                         y = signed_time_diff_min)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.7, outlier.alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 2) +
+  coord_flip() +
+  labs(
+    title = "FIRST_HIT Timing Offset by Route",
+    subtitle = "Routes with 3+ matched flights",
+    x = "Route",
+    y = "Time Difference (minutes)\n← Our Earlier | Brazil Earlier →",
+    caption = "Red line = exact match"
+  ) +
+  theme_minimal()
+```
+
+### Timing Offset vs Flight Duration
+
+```{r}
+#| label: plot-timing-vs-duration
+#| fig-width: 10
+#| fig-height: 6
+
+matched_timing_duration <- matched_timing |>
+  mutate(
+    flight_duration_min = as.numeric(difftime(last_time, first_time, units = "mins"))
+  )
+
+ggplot(matched_timing_duration, aes(x = flight_duration_min, y = abs(signed_time_diff_min))) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "loess", color = "red", se = TRUE) +
+  labs(
+    title = "Timing Offset vs Flight Duration",
+    subtitle = "Does longer flight correlate with larger time difference?",
+    x = "Flight Duration (minutes)",
+    y = "Absolute Time Difference (minutes)"
+  ) +
+  theme_minimal()
+```
+
+### FIRST_HIT vs LAST_HIT Comparison
+
+Check if Brazil's reference time is closer to takeoff or landing:
+
+```{r}
+#| label: first-vs-last-hit
+
+# Calculate difference from both FIRST_HIT and LAST_HIT
+hit_comparison <- matched_timing |>
+  mutate(
+    diff_from_first = abs(as.numeric(difftime(first_time, bra_time, units = "mins"))),
+    diff_from_last = abs(as.numeric(difftime(last_time, bra_time, units = "mins"))),
+    closer_to = if_else(diff_from_first < diff_from_last, "FIRST_HIT", "LAST_HIT")
+  )
+
+# Summary
+hit_comparison |>
+  count(closer_to) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  knitr::kable(
+    caption = "Brazil reference time proximity",
+    col.names = c("Closer To", "Count", "%")
+  )
+
+# Show examples where Brazil time is closer to LAST_HIT
+cat("\nFlights where Brazil time is closer to LAST_HIT (landing):\n")
+hit_comparison |>
+  filter(closer_to == "LAST_HIT") |>
+  select(fid, adep, ades, callsign, diff_from_first, diff_from_last) |>
+  arrange(desc(diff_from_last)) |>
+  head(10) |>
+  knitr::kable(
+    digits = 2,
+    col.names = c("FID", "ADEP", "ADES", "Callsign", "Δ First (min)", "Δ Last (min)")
+  )
+```
+
+## Summary & Recommendations
+
+**Key Findings**:
+
+1. **Coverage**: Our radar extract captured `r nrow(our_flights)`/`r nrow(bra_flights)` flights (`r round(100*nrow(our_flights)/nrow(bra_flights),1)`%)
+
+2. **Matching Success**:
+   - Callsign + Route: `r sum(matched_hybrid$match_method == "callsign")` flights
+   - Time-based (15 min): `r sum(matched_hybrid$match_method == "time")` flights
+   - **Total**: `r nrow(matched_hybrid)`/`r nrow(our_flights)` (`r round(100*nrow(matched_hybrid)/nrow(our_flights),1)`%)
+
+3. **Time Differences**:
+   - Median: `r round(median(matched_hybrid$time_diff_min),1)` minutes
+   - Mean: `r round(mean(matched_hybrid$time_diff_min),1)` minutes
+
+4. **Unmatched Flights**: `r nrow(unmatched_our)` (`r round(100*nrow(unmatched_our)/nrow(our_flights),1)`%)
+   - Potential reasons: Different callsigns in Brazil dataset, flights outside HFE scope, quality filters
+
+**Why Initial Matching Failed**:
+
+- 60-minute threshold was too strict for many flights
+- Did NOT prioritize callsign matching
+- Time fields represent different events (FIRST_HIT vs Brazil's reference time)
+
+**Recommendations**:
+
+1. **Use hybrid matching** for production (callsign priority + time fallback)
+2. **Investigate specific unmatched callsigns** - may need callsign mapping table
+3. **Proceed to HFE validation** with `r nrow(matched_hybrid)` matched flights
+4. **Document time reference differences** in methodology
+
+**Next Steps**: Calculate our HFE values and compare against Brazil reference.
